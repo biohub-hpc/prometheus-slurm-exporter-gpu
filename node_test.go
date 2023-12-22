@@ -40,7 +40,7 @@ slurm_node_mem_total{name="a048",status="mix"} 193000
 
 func TestNodeMetrics(t *testing.T) {
 	// Read the input data from a file
-	data, err := ioutil.ReadFile("test_data/sinfo_mem.txt")
+	data, err := ioutil.ReadFile("test_data/sinfo_mem2.txt")
 	if err != nil {
 		t.Fatalf("Can not open test data: %v", err)
 	}
