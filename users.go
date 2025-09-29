@@ -406,6 +406,15 @@ type UserJobMetrics struct {
     part_gpus          map[string]float64
     part_wait_time     map[string]float64
 
+    // Add partition-specific tracking
+    part_runtime      map[string]float64  // partition -> runtime seconds
+    part_cpus_pending map[string]float64  // partition -> pending CPUs
+    part_mem_pending  map[string]float64  // partition -> pending memory MB
+    part_near_timeout map[string]float64  // partition -> jobs near timeout
+    part_small_jobs   map[string]float64  // partition -> small jobs count
+    part_large_jobs   map[string]float64  // partition -> large jobs count
+    part_nodes        map[string]float64  // partition -> nodes running
+
     // Group metrics (if user belongs to a group)
     group              string
 }
@@ -439,6 +448,13 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
                 part_memory:    make(map[string]float64),
                 part_gpus:      make(map[string]float64),
                 part_wait_time: make(map[string]float64),
+                part_runtime:      make(map[string]float64),
+                part_cpus_pending: make(map[string]float64),
+                part_mem_pending:  make(map[string]float64),
+                part_near_timeout: make(map[string]float64),
+                part_small_jobs:   make(map[string]float64),
+                part_large_jobs:   make(map[string]float64),
+                part_nodes:        make(map[string]float64),
             }
         }
 
@@ -563,6 +579,12 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
             users[user].partitions[partition+"_pending"]++
             users[user].priority_sum += priority
 
+            // Add partition-specific pending resource tracking
+            users[user].part_cpus_pending[partition] += cpus
+            users[user].part_mem_pending[partition] += memoryMB
+
+
+
         case "r", "running":
             users[user].running++
             users[user].running_cpus += cpus
@@ -636,6 +658,26 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
                 users[user].reservation_jobs++
                 users[user].reserved_cpus += cpus
                 users[user].reserved_nodes += nodes
+            }
+            // Add partition runtime tracking
+            users[user].part_runtime[partition] += timeUsed
+
+            // Add partition nodes tracking
+            users[user].part_nodes[partition] += nodes
+
+            // Check if near timeout BY PARTITION
+            if timeLeft > 0 && timeUsed > 0 {
+                percentUsed := (timeUsed / (timeUsed + timeLeft)) * 100
+                if percentUsed > 90 {
+                    users[user].part_near_timeout[partition]++
+                }
+            }
+
+            // Job size classification BY PARTITION
+            if cpus < 4 {
+                users[user].part_small_jobs[partition]++
+            } else if cpus > 64 {
+                users[user].part_large_jobs[partition]++
             }
 
         case "s", "suspended":
@@ -863,6 +905,14 @@ type UsersCollector struct {
     partition_memory   *prometheus.Desc
     partition_gpus     *prometheus.Desc
     partition_wait     *prometheus.Desc
+    partition_runtime      *prometheus.Desc
+    partition_cpus_pending *prometheus.Desc
+    partition_mem_pending  *prometheus.Desc
+    partition_near_timeout *prometheus.Desc
+    partition_small_jobs   *prometheus.Desc
+    partition_large_jobs   *prometheus.Desc
+    partition_nodes        *prometheus.Desc
+
 
     // Group metrics
     group_cpus         *prometheus.Desc
@@ -1036,6 +1086,27 @@ func NewUsersCollector() *UsersCollector {
         partition_wait: prometheus.NewDesc(
             "slurm_user_partition_wait_seconds",
             "Wait time per partition", partLabels, nil),
+        partition_runtime: prometheus.NewDesc(
+            "slurm_user_partition_runtime_seconds",
+            "Total runtime seconds per partition", partLabels, nil),
+        partition_cpus_pending: prometheus.NewDesc(
+            "slurm_user_partition_cpus_pending",
+            "Pending CPUs per partition", partLabels, nil),
+        partition_mem_pending: prometheus.NewDesc(
+            "slurm_user_partition_memory_pending_mb",
+            "Pending memory MB per partition", partLabels, nil),
+        partition_near_timeout: prometheus.NewDesc(
+            "slurm_user_partition_jobs_near_timeout",
+            "Jobs near timeout per partition", partLabels, nil),
+        partition_small_jobs: prometheus.NewDesc(
+            "slurm_user_partition_small_jobs",
+            "Small jobs (<4 CPUs) per partition", partLabels, nil),
+        partition_large_jobs: prometheus.NewDesc(
+            "slurm_user_partition_large_jobs",
+            "Large jobs (>64 CPUs) per partition", partLabels, nil),
+        partition_nodes: prometheus.NewDesc(
+            "slurm_user_partition_nodes_running",
+            "Running nodes per partition", partLabels, nil),
 
         // Groups
         group_cpus: prometheus.NewDesc(
@@ -1108,6 +1179,13 @@ func (uc *UsersCollector) Describe(ch chan<- *prometheus.Desc) {
     ch <- uc.partition_memory
     ch <- uc.partition_gpus
     ch <- uc.partition_wait
+    ch <- uc.partition_runtime
+    ch <- uc.partition_cpus_pending
+    ch <- uc.partition_mem_pending
+    ch <- uc.partition_near_timeout
+    ch <- uc.partition_small_jobs
+    ch <- uc.partition_large_jobs
+    ch <- uc.partition_nodes
     ch <- uc.group_cpus
     ch <- uc.group_gpus
     ch <- uc.group_memory
@@ -1359,6 +1437,49 @@ func (uc *UsersCollector) Collect(ch chan<- prometheus.Metric) {
             if wait > 0 {
                 ch <- prometheus.MustNewConstMetric(uc.partition_wait,
                     prometheus.GaugeValue, wait, u, part)
+            }
+        }
+	// Add after existing partition metrics
+        for part, runtime := range m.part_runtime {
+            if runtime > 0 {
+                ch <- prometheus.MustNewConstMetric(uc.partition_runtime,
+                    prometheus.GaugeValue, runtime, u, part)
+            }
+        }
+        for part, cpus := range m.part_cpus_pending {
+            if cpus > 0 {
+                ch <- prometheus.MustNewConstMetric(uc.partition_cpus_pending,
+                    prometheus.GaugeValue, cpus, u, part)
+            }
+        }
+        for part, mem := range m.part_mem_pending {
+            if mem > 0 {
+                ch <- prometheus.MustNewConstMetric(uc.partition_mem_pending,
+                    prometheus.GaugeValue, mem, u, part)
+            }
+        }
+        for part, count := range m.part_near_timeout {
+            if count > 0 {
+                ch <- prometheus.MustNewConstMetric(uc.partition_near_timeout,
+                    prometheus.GaugeValue, count, u, part)
+            }
+        }
+        for part, count := range m.part_small_jobs {
+            if count > 0 {
+                ch <- prometheus.MustNewConstMetric(uc.partition_small_jobs,
+                    prometheus.GaugeValue, count, u, part)
+            }
+        }
+        for part, count := range m.part_large_jobs {
+            if count > 0 {
+                ch <- prometheus.MustNewConstMetric(uc.partition_large_jobs,
+                    prometheus.GaugeValue, count, u, part)
+            }
+        }
+        for part, nodes := range m.part_nodes {
+            if nodes > 0 {
+                ch <- prometheus.MustNewConstMetric(uc.partition_nodes,
+                    prometheus.GaugeValue, nodes, u, part)
             }
         }
 
