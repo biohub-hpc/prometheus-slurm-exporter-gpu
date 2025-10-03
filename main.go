@@ -61,8 +61,6 @@ func main() {
                 prometheus.MustRegister(NewGPUsCollector()) // from gpus.go
         }
 
-	TestExpandNodeList()
-
         // Only enable job history if flag is set (since it can be expensive)
         if *jobHistory {
                 log.Info("Job history metrics enabled - this may impact performance")

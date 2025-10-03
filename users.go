@@ -227,10 +227,9 @@ func parseSubmitTime(timeStr string) time.Time {
 }
 
 // Get extended data from squeue with all fields
-// Get extended data from squeue with all fields
 func UsersDataComplete() ([]byte, map[string]map[string]string) {
     // First get basic job info with standard format that we know works
-    cmd1 := exec.Command("squeue", "-a", "-r", "-h",
+    cmd1 := exec.Command("squeue","-a", "-r", "-h",
         "-o", "%i|%u|%P|%j|%T|%M|%L|%S|%p|%q|%N")
     
     output1, err := cmd1.Output()
@@ -240,7 +239,8 @@ func UsersDataComplete() ([]byte, map[string]map[string]string) {
     }
     
     // Then get TRES data separately with --Format
-    cmd2 := exec.Command("squeue", "-a", "-r", "-h",
+//    cmd2 := exec.Command("squeue","-t all ", "-a", "-r", "-h",
+    cmd2 := exec.Command("squeue","-a", "-r", "-h",
         "--Format=JobID:20,tres-alloc:100")
     
     output2, err := cmd2.Output()
@@ -321,7 +321,8 @@ func UsersDataComplete() ([]byte, map[string]map[string]string) {
 
 // Keep existing simple function for backward compatibility
 func UsersData() []byte {
-    cmd := exec.Command("squeue", "-a", "-r", "-h", "-o", "%A|%u|%T|%C")
+//  cmd := exec.Command("squeue","-t all ", "-a", "-r", "-h", "-o", "%A|%u|%T|%C")
+    cmd := exec.Command("squeue","-a", "-r", "-h", "-o", "%A|%u|%T|%C")
     stdout, err := cmd.StdoutPipe()
     if err != nil {
         log.Fatal(err)
@@ -592,10 +593,11 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
             users[user].gpus += gpus
             users[user].nodes += nodes
 
+	    cpuTime := timeUsed * cpus
             // Runtime metrics
-            users[user].total_runtime_seconds += timeUsed
+            users[user].total_runtime_seconds += cpuTime
             if timeUsed > users[user].max_runtime_seconds {
-                users[user].max_runtime_seconds = timeUsed
+                users[user].max_runtime_seconds = cpuTime 
             }
             users[user].total_timeleft_seconds += timeLeft
 

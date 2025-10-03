@@ -282,13 +282,14 @@ func ParseAllocatedGPUsByTypeAndUser() (float64, map[string]float64, map[string]
 	gpusByType := make(map[string]float64)
 	gpusByUserAndType := make(map[string]map[string]float64)
 	
-	// First, get the node to GPU mapping
+	// Get node to GPU mapping
 	nodeGPUMap := GetNodeGPUMapping()
 	
-	// Get running jobs
-	args := []string{"-h", "-o", "%i|%u|%P|%N|%t", "-t", "RUNNING"}
+	// Simple squeue command - when run as root, includes TRES_ALLOC
+	args := []string{"-t", "RUNNING", "-h"}
 	output := string(Execute("squeue", args))
-	// Log first few lines of squeue output
+	
+	// Log raw output for debugging
 	lines := strings.Split(output, "\n")
 	log.Infof("=== Raw squeue output (first 10 lines) ===")
 	for i, line := range lines {
@@ -303,62 +304,77 @@ func ParseAllocatedGPUsByTypeAndUser() (float64, map[string]float64, map[string]
 	gpuJobCount := 0
 	
 	if len(output) > 0 {
-		for _, line := range strings.Split(output, "\n") {
-			if len(line) > 0 {
-				fields := strings.Split(line, "|")
-				if len(fields) >= 5 {
-					jobid := fields[0]
-					user := fields[1]
-					partition := fields[2]
-					nodeList := fields[3]
-					state := fields[4]
-					
-					// Skip if not running
-					if state != "R" {
-						continue
+		for _, line := range lines {
+			if line == "" {
+				continue
+			}
+			
+			// Default squeue format has TRES_ALLOC in a predictable position
+			// We need to parse carefully since TRES field contains commas
+			fields := strings.Fields(line)
+			if len(fields) < 8 {
+				continue
+			}
+			
+			// Fields: JOBID USER PARTITION NAME ST TIME_LEFT TRES_ALLOC NODELIST
+			jobid := fields[0]
+			user := fields[1]
+			partition := fields[2]
+			
+			// Find the TRES field - it contains "cpu=X,mem=X,..." pattern
+			tresField := ""
+			nodeField := ""
+			for i, field := range fields {
+				if strings.Contains(field, "cpu=") && strings.Contains(field, "mem=") {
+					tresField = field
+					// NodeList is the next field after TRES
+					if i+1 < len(fields) {
+						nodeField = fields[i+1]
 					}
-					
-					jobCount++
-					
-					// Expand the node list to individual nodes
-					nodes := expandNodeList(nodeList)
-					
-					// Log ALL GPU jobs for debugging (not just first 10)
-					debugLog := false
-					foundGPU := false
-					
-					// For each node this job is using, count the GPUs
-					for _, node := range nodes {
-						if nodeInfo, exists := nodeGPUMap[node]; exists {
-							foundGPU = true
-							// Check if this is a GPU partition
-							if strings.Contains(partition, "gpu") || strings.Contains(partition, "interact") || strings.Contains(partition, "preempt") {
-								gpusUsed := 1.0
-								gpuJobCount++
-								
-								// Log GPU jobs to see what's being counted
-								if !debugLog {
-									log.Debugf("GPU Job %s: user=%s, partition=%s, node=%s, gpu_type=%s", 
-										jobid, user, partition, node, nodeInfo.gpuType)
-									debugLog = true // Only log once per job
-								}
-								
-								totalGPUs += gpusUsed
-								gpusByType[nodeInfo.gpuType] += gpusUsed
-								
-								// Initialize user map if needed
-								if _, exists := gpusByUserAndType[user]; !exists {
-									gpusByUserAndType[user] = make(map[string]float64)
-								}
-								gpusByUserAndType[user][nodeInfo.gpuType] += gpusUsed
-							}
-						}
+					break
+				}
+			}
+			
+			if tresField == "" {
+				continue
+			}
+			
+			jobCount++
+			
+			// Parse GPU count from TRES
+			gpusRequested := parseGPUFromTRES(tresField)
+			
+			if gpusRequested > 0 {
+				gpuJobCount++
+				
+				// Get GPU type from node
+				nodes := expandNodeList(nodeField)
+				
+				// Determine GPU type from first node
+				gpuType := ""
+				for _, node := range nodes {
+					if nodeInfo, exists := nodeGPUMap[node]; exists {
+						gpuType = nodeInfo.gpuType
+						break
 					}
+				}
+				
+				if gpuType != "" {
+					totalGPUs += gpusRequested
+					gpusByType[gpuType] += gpusRequested
 					
-					// Log if we found a job on GPU nodes but didn't count it
-					if foundGPU && !strings.Contains(partition, "gpu") && !strings.Contains(partition, "interact") && !strings.Contains(partition, "preempt") {
-						log.Warnf("Job %s on GPU node but partition '%s' not recognized as GPU partition", jobid, partition)
+					if _, exists := gpusByUserAndType[user]; !exists {
+						gpusByUserAndType[user] = make(map[string]float64)
 					}
+					gpusByUserAndType[user][gpuType] += gpusRequested
+					
+					// Log first few GPU jobs for debugging
+					if gpuJobCount <= 10 {
+						log.Debugf("GPU Job %s: user=%s, partition=%s, node=%s, gpu_type=%s, gpus=%v", 
+							jobid, user, partition, nodeField, gpuType, gpusRequested)
+					}
+				} else {
+					log.Warnf("Could not determine GPU type for job %s on node %s", jobid, nodeField)
 				}
 			}
 		}
@@ -390,6 +406,20 @@ func ParseAllocatedGPUsByTypeAndUser() (float64, map[string]float64, map[string]
 	}
 	
 	return totalGPUs, gpusByType, gpusByUserAndType
+}
+
+// Parse GPU count from TRES format
+func parseGPUFromTRES(tres string) float64 {
+        // TRES format: "billing=16,cpu=16,mem=59000M,node=1,gres/gpu=1"
+        for _, item := range strings.Split(tres, ",") {
+                if strings.HasPrefix(item, "gres/gpu=") {
+                        countStr := strings.TrimPrefix(item, "gres/gpu=")
+                        if count, err := strconv.ParseFloat(countStr, 64); err == nil {
+                                return count
+                        }
+                }
+        }
+        return 0
 }
 
 func ParseAllocatedGPUs() float64 {
