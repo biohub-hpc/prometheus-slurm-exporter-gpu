@@ -16,11 +16,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 package main
 
 import (
-	"fmt"
         "io/ioutil"
         "os/exec"
         "log"
-        "sort"
         "strings"
         "strconv"
         "time"
@@ -30,8 +28,8 @@ import (
 // Single wait time metric for running jobs
 var runningJobsWaitTimeBySize = prometheus.NewDesc(
     "slurm_running_jobs_wait_time_by_size_seconds",
-    "Wait time statistics for currently running jobs by size",
-    []string{"partition", "job_size", "resource_type", "stat"}, // stat: min, max, avg, median, p95
+    "Wait time in seconds for each currently running job",
+    []string{"jobid", "partition", "job_size", "resource_type", "user"},
     nil,
 )
 
@@ -101,156 +99,82 @@ func getCPUJobSize(cpuCount int) string {
     }
 }
 
-// Parse squeue timestamp
-func parseSqueueTimestamp(ts string) (time.Time, error) {
-    // Try ISO format first (most common)
-    if t, err := time.Parse("2006-01-02T15:04:05", ts); err == nil {
-        return t, nil
-    }
-
-    // Try epoch timestamp
-    if epoch, err := strconv.ParseInt(ts, 10, 64); err == nil {
-        return time.Unix(epoch, 0), nil
-    }
-
-    // Try MM/DD-HH:MM:SS format (add current year)
-    if strings.Contains(ts, "/") && strings.Contains(ts, "-") {
-        currentYear := time.Now().Year()
-        tsWithYear := fmt.Sprintf("%d/%s", currentYear, ts)
-        if t, err := time.Parse("2006/01/02-15:04:05", tsWithYear); err == nil {
-            return t, nil
-        }
-    }
-
-    return time.Time{}, fmt.Errorf("cannot parse timestamp: %s", ts)
-}
-
-// Statistics tracker
-type waitTimeStats struct {
-    values []float64
-}
-
-func (w *waitTimeStats) add(value float64) {
-    w.values = append(w.values, value)
-}
-
-func (w *waitTimeStats) calculate() (min, max, avg, median, p95 float64) {
-    if len(w.values) == 0 {
-        return 0, 0, 0, 0, 0
-    }
-
-    // Sort for percentile calculations
-    sort.Float64s(w.values)
-
-    min = w.values[0]
-    max = w.values[len(w.values)-1]
-
-    // Calculate average
-    sum := 0.0
-    for _, v := range w.values {
-        sum += v
-    }
-    avg = sum / float64(len(w.values))
-
-    // Calculate median (50th percentile)
-    medianIdx := len(w.values) / 2
-    if len(w.values)%2 == 0 && medianIdx > 0 {
-        median = (w.values[medianIdx-1] + w.values[medianIdx]) / 2
-    } else {
-        median = w.values[medianIdx]
-    }
-
-    // Calculate 95th percentile
-    p95Idx := int(float64(len(w.values)-1) * 0.95)
-    p95 = w.values[p95Idx]
-
-    return min, max, avg, median, p95
-}
 
 func (pc *PartitionsCollector) collectRunningJobsWaitTime(ch chan<- prometheus.Metric) {
-    // Use --Format to get tres-alloc information
+    // Use --Format to get tres-alloc information including user
     cmd := exec.Command("squeue",
         "-h",                    // No header
         "-r",                    // Expand array jobs
         "-t", "RUNNING",         // Only running jobs
-        "--Format", "jobid,partition,submittime,starttime,tres-alloc:100",
+        "--Format", "jobid,username,partition,submittime,starttime,tres-alloc:100",
     )
-    
+
     output, err := cmd.Output()
     if err != nil {
         log.Printf("ERROR: Failed to execute squeue: %v", err)
         return
     }
-    
-    // Map to track wait times
-    statsMap := make(map[string]map[string]map[string]*waitTimeStats)
-    
+
     lines := strings.Split(string(output), "\n")
-    
-    totalJobs := 0
-    parsedJobs := 0
-    
+
+    totalLines := 0
+    processedJobs := 0
+
     for _, line := range lines {
         if line == "" {
             continue
         }
-        
-        totalJobs++
-        
-        // The output has fixed-width columns with spaces
-        // We need to be more careful about parsing
-        // Example line:
-        // "23656800            cpu                 2025-10-02T13:58:38 2025-10-02T13:58:38 cpu=16,mem=250G,node=1,billing=16"
-        
-        // Use a regex or careful splitting to handle the fixed-width format
-        // JobID is left-aligned, followed by spaces
-        // Partition is left-aligned, followed by spaces
-        // Times are in ISO format
-        // TRES is everything after the second timestamp
-        
+
+        totalLines++
+
         // Split into fields, handling multiple spaces
         fields := strings.Fields(line)
-        if len(fields) < 5 {
+        if len(fields) < 6 {
+            log.Printf("DEBUG: Skipping line with insufficient fields (%d): %s", len(fields), line)
             continue
         }
-        
-        //jobID := fields[0]
-        partition := fields[1]
-        submitTimeStr := fields[2]
-        startTimeStr := fields[3]
-        
-        // Everything after the 4th field is TRES allocation
-        // Join them in case TRES has spaces (though it typically doesn't)
-        tresAlloc := strings.Join(fields[4:], " ")
-        
-        // Parse timestamps (ISO format based on your output)
+
+        jobID := fields[0]
+        user := fields[1]
+        partition := fields[2]
+        submitTimeStr := fields[3]
+        startTimeStr := fields[4]
+
+        // Everything after the 5th field is TRES allocation
+        tresAlloc := strings.Join(fields[5:], " ")
+
+        // Parse timestamps (ISO format)
         submitTime, err := time.Parse("2006-01-02T15:04:05", submitTimeStr)
         if err != nil {
+            log.Printf("DEBUG: Failed to parse submit time '%s' for job %s: %v", submitTimeStr, jobID, err)
             continue
         }
-        
+
         startTime, err := time.Parse("2006-01-02T15:04:05", startTimeStr)
         if err != nil {
+            log.Printf("DEBUG: Failed to parse start time '%s' for job %s: %v", startTimeStr, jobID, err)
             continue
         }
-        
+
         // Calculate wait time
         waitTime := startTime.Sub(submitTime).Seconds()
         if waitTime < 0 {
+            log.Printf("DEBUG: Negative wait time for job %s: %v seconds", jobID, waitTime)
             continue
         }
-        
+
         // Parse resources from TRES allocation string
         gpuCount := parseGPUFromTRESPart(tresAlloc)
         cpuCount := parseCPUFromTRES(tresAlloc)
-        
+
         if cpuCount == 0 && gpuCount == 0 {
+            log.Printf("DEBUG: Job %s has no CPU or GPU resources (tres: %s)", jobID, tresAlloc)
             continue
         }
-        
+
         // Determine job size and type
         var jobSize, resourceType string
-        
+
         if gpuCount > 0 {
             jobSize = getGPUJobSize(int(gpuCount))
             resourceType = "gpu"
@@ -258,65 +182,28 @@ func (pc *PartitionsCollector) collectRunningJobsWaitTime(ch chan<- prometheus.M
             jobSize = getCPUJobSize(cpuCount)
             resourceType = "cpu"
         }
-        
+
         if jobSize == "" {
+            log.Printf("DEBUG: Job %s resulted in empty job size", jobID)
             continue
         }
-        
-        // Initialize nested maps
-        if statsMap[partition] == nil {
-            statsMap[partition] = make(map[string]map[string]*waitTimeStats)
-        }
-        if statsMap[partition][resourceType] == nil {
-            statsMap[partition][resourceType] = make(map[string]*waitTimeStats)
-        }
-        if statsMap[partition][resourceType][jobSize] == nil {
-            statsMap[partition][resourceType][jobSize] = &waitTimeStats{}
-        }
-        
-        statsMap[partition][resourceType][jobSize].add(waitTime)
-        parsedJobs++
-    }
-    
-    // Calculate and emit statistics
-    for partition, resourceMap := range statsMap {
-        for resourceType, sizeMap := range resourceMap {
-            for jobSize, stats := range sizeMap {
-                min, max, avg, median, p95 := stats.calculate()
-                
-                ch <- prometheus.MustNewConstMetric(
-                    pc.waitTimeBySize,
-                    prometheus.GaugeValue,
-                    min,
-                    partition, jobSize, resourceType, "min",
-                )
-                ch <- prometheus.MustNewConstMetric(
-                    pc.waitTimeBySize,
-                    prometheus.GaugeValue,
-                    max,
-                    partition, jobSize, resourceType, "max",
-                )
-                ch <- prometheus.MustNewConstMetric(
-                    pc.waitTimeBySize,
-                    prometheus.GaugeValue,
-                    avg,
-                    partition, jobSize, resourceType, "avg",
-                )
-                ch <- prometheus.MustNewConstMetric(
-                    pc.waitTimeBySize,
-                    prometheus.GaugeValue,
-                    median,
-                    partition, jobSize, resourceType, "median",
-                )
-                ch <- prometheus.MustNewConstMetric(
-                    pc.waitTimeBySize,
-                    prometheus.GaugeValue,
-                    p95,
-                    partition, jobSize, resourceType, "p95",
-                )
-            }
+
+        // Emit a metric for this individual job
+        ch <- prometheus.MustNewConstMetric(
+            pc.waitTimeBySize,
+            prometheus.GaugeValue,
+            waitTime,
+            jobID, partition, jobSize, resourceType, user,
+        )
+
+        processedJobs++
+        if processedJobs <= 3 {
+            log.Printf("DEBUG: Emitted metric for job %s: partition=%s, size=%s, type=%s, user=%s, wait_time=%v",
+                jobID, partition, jobSize, resourceType, user, waitTime)
         }
     }
+
+    log.Printf("INFO: collectRunningJobsWaitTime processed %d lines, emitted %d metrics", totalLines, processedJobs)
 }
 
 func parseGPUFromTRESPart(tres string) int {
@@ -446,7 +333,7 @@ type PartitionsCollector struct {
 
 func NewPartitionsCollector() *PartitionsCollector {
         labels := []string{"partition"}
-        waitTimeLabels := []string{"partition", "job_size", "resource_type", "stat"}
+        waitTimeLabels := []string{"jobid", "partition", "job_size", "resource_type", "user"}
 
         return &PartitionsCollector{
                 allocated: prometheus.NewDesc("slurm_partition_cpus_allocated", "Allocated CPUs for partition", labels,nil),
@@ -456,8 +343,8 @@ func NewPartitionsCollector() *PartitionsCollector {
 		total: prometheus.NewDesc("slurm_partition_cpus_total", "Total CPUs for partition", labels,nil),
                 waitTimeBySize: prometheus.NewDesc(
                   "slurm_running_jobs_wait_time_by_size_seconds",
-                  "Wait time statistics for currently running jobs by size",
-                  waitTimeLabels,  // <-- This should be the 4-label array, not 'labels'
+                  "Wait time in seconds for each currently running job",
+                  waitTimeLabels,
                   nil,
                 ),
         }
