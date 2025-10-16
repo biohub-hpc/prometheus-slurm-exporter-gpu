@@ -229,7 +229,7 @@ func parseSubmitTime(timeStr string) time.Time {
 // Get extended data from squeue with all fields
 func UsersDataComplete() ([]byte, map[string]map[string]string) {
     // First get basic job info with standard format that we know works
-    cmd1 := exec.Command("squeue","-a", "-r", "-h",
+    cmd1 := exec.Command("squeue","-a", "-h",
         "-o", "%i|%u|%P|%j|%T|%M|%L|%S|%p|%q|%N")
     
     output1, err := cmd1.Output()
@@ -240,7 +240,7 @@ func UsersDataComplete() ([]byte, map[string]map[string]string) {
     
     // Then get TRES data separately with --Format
 //    cmd2 := exec.Command("squeue","-t all ", "-a", "-r", "-h",
-    cmd2 := exec.Command("squeue","-a", "-r", "-h",
+    cmd2 := exec.Command("squeue","-a", "-h",
         "--Format=JobID:20,tres-alloc:100")
     
     output2, err := cmd2.Output()
@@ -282,10 +282,21 @@ func UsersDataComplete() ([]byte, map[string]map[string]string) {
         fields := strings.Split(line, "|")
         if len(fields) >= 11 {
             jobID := strings.TrimSpace(fields[0])
-            
+
             // Get TRES from our map, or use empty string if not found
+            // For array jobs, extract base job ID (e.g., "23944726_7" -> "23944726")
             tres := ""
-            if t, ok := tresMap[jobID]; ok {
+            baseJobID := jobID
+            if strings.Contains(jobID, "_") {
+                parts := strings.Split(jobID, "_")
+                baseJobID = parts[0]
+            }
+
+            // Try looking up with base job ID first (for array jobs)
+            if t, ok := tresMap[baseJobID]; ok {
+                tres = t
+            } else if t, ok := tresMap[jobID]; ok {
+                // Fallback to full job ID
                 tres = t
             }
             
@@ -513,13 +524,37 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
         // Track job history
         userJobHistoryMux.Lock()
         if entry, exists := userJobHistory[jobID]; exists {
+            // Detect state transition to running (job started)
+            if entry.State != "r" && entry.State != "running" && (state == "r" || state == "running") {
+                // Job just started running
+                log.Printf("Job %s transitioned to running state (partition: %s, user: %s)", jobID, partition, user)
+                countsMux.Lock()
+                if userJobCounts[user] == nil {
+                    userJobCounts[user] = make(map[string]float64)
+                }
+                userJobCounts[user]["started"]++
+                userJobCounts[user]["started_"+partition]++
+                countsMux.Unlock()
+            }
+
             entry.LastSeen = currentTime
             entry.State = state
             if exitCode != 0 {
                 entry.ExitCode = exitCode
             }
         } else {
-            // New job detected
+            // New job detected - if it's already running, count it as started
+            if state == "r" || state == "running" {
+                log.Printf("New job %s first seen in running state (partition: %s, user: %s)", jobID, partition, user)
+                countsMux.Lock()
+                if userJobCounts[user] == nil {
+                    userJobCounts[user] = make(map[string]float64)
+                }
+                userJobCounts[user]["started"]++
+                userJobCounts[user]["started_"+partition]++
+                countsMux.Unlock()
+            }
+
             userJobHistory[jobID] = &JobHistoryEntry{
                 JobID:       jobID,
                 User:        user,
@@ -662,7 +697,7 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
                 users[user].reserved_nodes += nodes
             }
             // Add partition runtime tracking
-            users[user].part_runtime[partition] += timeUsed
+            users[user].part_runtime[partition] += cpuTime
 
             // Add partition nodes tracking
             users[user].part_nodes[partition] += nodes
@@ -743,7 +778,8 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
     // Check for completed jobs
     userJobHistoryMux.Lock()
     for jobID, entry := range userJobHistory {
-        if !seenJobs[jobID] && (entry.State == "r" || entry.State == "running") {
+        // Count jobs that were running or completing and have now disappeared from the queue
+        if !seenJobs[jobID] && (entry.State == "r" || entry.State == "running" || entry.State == "completing" || entry.State == "cg") {
             entry.State = "completed"
             entry.LastSeen = currentTime
 
@@ -924,6 +960,7 @@ type UsersCollector struct {
     // Historical counters
     jobs_submitted     *prometheus.Desc
     jobs_completed     *prometheus.Desc
+    jobs_started       *prometheus.Desc
     array_submitted    *prometheus.Desc
 }
 
@@ -1128,6 +1165,9 @@ func NewUsersCollector() *UsersCollector {
         jobs_completed: prometheus.NewDesc(
             "slurm_user_jobs_completed_total",
             "Total jobs completed", partLabels, nil),
+        jobs_started: prometheus.NewDesc(
+            "slurm_user_jobs_started_total",
+            "Total jobs started (transitioned to running)", partLabels, nil),
         array_submitted: prometheus.NewDesc(
             "slurm_user_array_jobs_submitted_total",
             "Total array jobs submitted", labels, nil),
@@ -1193,6 +1233,7 @@ func (uc *UsersCollector) Describe(ch chan<- *prometheus.Desc) {
     ch <- uc.group_memory
     ch <- uc.jobs_submitted
     ch <- uc.jobs_completed
+    ch <- uc.jobs_started
     ch <- uc.array_submitted
 }
 
@@ -1524,11 +1565,18 @@ func (uc *UsersCollector) Collect(ch chan<- prometheus.Metric) {
                 partition := strings.TrimPrefix(metric, "completed_")
                 ch <- prometheus.MustNewConstMetric(uc.jobs_completed,
                     prometheus.CounterValue, value, user, partition)
+            } else if strings.HasPrefix(metric, "started_") {
+                partition := strings.TrimPrefix(metric, "started_")
+                ch <- prometheus.MustNewConstMetric(uc.jobs_started,
+                    prometheus.CounterValue, value, user, partition)
             } else if metric == "submitted" {
                 ch <- prometheus.MustNewConstMetric(uc.jobs_submitted,
                     prometheus.CounterValue, value, user, "all")
             } else if metric == "completed" {
                 ch <- prometheus.MustNewConstMetric(uc.jobs_completed,
+                    prometheus.CounterValue, value, user, "all")
+            } else if metric == "started" {
+                ch <- prometheus.MustNewConstMetric(uc.jobs_started,
                     prometheus.CounterValue, value, user, "all")
             } else if metric == "array_submitted" {
                 ch <- prometheus.MustNewConstMetric(uc.array_submitted,
