@@ -49,6 +49,8 @@ type JobHistoryEntry struct {
     ArrayTaskID  string    `json:"array_task_id"`
     ExitCode     int       `json:"exit_code"`
     NodeList     string    `json:"node_list"`
+    RunPartition string    `json:"run_partition"`   // Actual partition where job ran
+    LastCPUTime  float64   `json:"last_cpu_time"`   // Last observed CPU-seconds (timeUsed × CPUs)
 }
 
 var (
@@ -60,16 +62,35 @@ var (
     userJobCounts      map[string]map[string]float64
     countsMux          sync.RWMutex
 
+    // Cumulative CPU-seconds counter per user per partition
+    userPartitionCPUSeconds map[string]map[string]float64
+    cpuSecondsMux           sync.RWMutex
+
+    // Last observed CPU-seconds (for delta calculation)
+    lastObservedCPUSeconds map[string]map[string]float64
+    lastObservedMux        sync.RWMutex
+
     // Group mappings (could be loaded from config)
     userGroups         map[string]string  // user -> group mapping
+
+    // Cached node-to-partition mapping
+    cachedNodePartitionMap map[string]string
+    nodePartitionMapMux    sync.RWMutex
+    lastMapUpdate          time.Time
+    mapUpdateInterval      = 5 * time.Minute  // Refresh every 5 minutes
 )
 
 func init() {
     userJobHistory = make(map[string]*JobHistoryEntry)
     userJobCounts = make(map[string]map[string]float64)
+    userPartitionCPUSeconds = make(map[string]map[string]float64)
+    lastObservedCPUSeconds = make(map[string]map[string]float64)
     userGroups = make(map[string]string)
+    cachedNodePartitionMap = make(map[string]string)
     loadUserJobHistory()
     loadUserGroups()
+    // Build initial node-partition map
+    refreshNodePartitionMap()
 }
 
 func loadUserGroups() {
@@ -224,6 +245,101 @@ func parseSubmitTime(timeStr string) time.Time {
     }
 
     return time.Time{}
+}
+
+// Refresh the node-to-partition map (called periodically)
+func refreshNodePartitionMap() {
+    nodePartitionMap := make(map[string]string)
+
+    // Use sinfo to get node to partition mapping
+    // Format: NodeList Partition
+    cmd := exec.Command("sinfo", "-h", "-N", "-o", "%N %P")
+    output, err := cmd.Output()
+    if err != nil {
+        log.Printf("Error getting node partition mapping: %v", err)
+        return
+    }
+
+    lines := strings.Split(string(output), "\n")
+    for _, line := range lines {
+        line = strings.TrimSpace(line)
+        if line == "" {
+            continue
+        }
+
+        fields := strings.Fields(line)
+        if len(fields) >= 2 {
+            nodeName := fields[0]
+            partition := strings.ReplaceAll(fields[1], "*", "") // Remove asterisk from default partition
+
+            // Skip overlay partitions (preempted, admin) to avoid confusion
+            // We want the actual physical partition the node belongs to
+            if partition != "preempted" && partition != "admin" {
+                nodePartitionMap[nodeName] = partition
+            }
+        }
+    }
+
+    // Update the cached map
+    nodePartitionMapMux.Lock()
+    cachedNodePartitionMap = nodePartitionMap
+    lastMapUpdate = time.Now()
+    nodePartitionMapMux.Unlock()
+
+    log.Printf("Built node-partition map with %d nodes", len(nodePartitionMap))
+}
+
+// Get the current node-to-partition map, refreshing if needed
+func getNodePartitionMap() map[string]string {
+    nodePartitionMapMux.RLock()
+
+    // Check if refresh is needed
+    needsRefresh := time.Since(lastMapUpdate) > mapUpdateInterval
+
+    if !needsRefresh {
+        // Return cached copy
+        mapCopy := make(map[string]string, len(cachedNodePartitionMap))
+        for k, v := range cachedNodePartitionMap {
+            mapCopy[k] = v
+        }
+        nodePartitionMapMux.RUnlock()
+        return mapCopy
+    }
+
+    nodePartitionMapMux.RUnlock()
+
+    // Refresh needed - do it asynchronously to avoid blocking
+    go refreshNodePartitionMap()
+
+    // Return current cached version
+    nodePartitionMapMux.RLock()
+    mapCopy := make(map[string]string, len(cachedNodePartitionMap))
+    for k, v := range cachedNodePartitionMap {
+        mapCopy[k] = v
+    }
+    nodePartitionMapMux.RUnlock()
+
+    return mapCopy
+}
+
+// Get run partition from node list using the node-partition map
+func getRunPartitionFromNodes(nodeList string, nodePartitionMap map[string]string) string {
+    if nodeList == "" || nodeList == "N/A" {
+        return ""
+    }
+
+    // Get first node from the list
+    firstNode := strings.Split(nodeList, ",")[0]
+    // Remove any bracket notation like node[1-3]
+    firstNode = strings.Split(firstNode, "[")[0]
+    firstNode = strings.TrimSpace(firstNode)
+
+    // Look up in the map
+    if partition, exists := nodePartitionMap[firstNode]; exists {
+        return partition
+    }
+
+    return ""
 }
 
 // Get extended data from squeue with all fields
@@ -439,6 +555,9 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
     currentTime := time.Now()
     seenJobs := make(map[string]bool)
 
+    // Build node-to-partition map for determining where jobs actually run
+    nodePartitionMap := getNodePartitionMap()
+
     for jobID, job := range jobData {
         user := job["user"]
         if user == "" {
@@ -521,6 +640,17 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
         // Parse node list
         nodeList := job["nodes"]
 
+        // Determine where the job actually runs (for running jobs)
+        runPartition := ""
+        cpuTime := float64(0)
+        if state == "r" || state == "running" {
+            cpuTime = timeUsed * cpus
+            runPartition = getRunPartitionFromNodes(nodeList, nodePartitionMap)
+            if runPartition == "" {
+                runPartition = partition
+            }
+        }
+
         // Track job history
         userJobHistoryMux.Lock()
         if entry, exists := userJobHistory[jobID]; exists {
@@ -539,6 +669,8 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
 
             entry.LastSeen = currentTime
             entry.State = state
+            entry.LastCPUTime = cpuTime
+            entry.RunPartition = runPartition
             if exitCode != 0 {
                 entry.ExitCode = exitCode
             }
@@ -556,23 +688,25 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
             }
 
             userJobHistory[jobID] = &JobHistoryEntry{
-                JobID:       jobID,
-                User:        user,
-                Partition:   partition,
-                JobName:     job["name"],
-                FirstSeen:   currentTime,
-                LastSeen:    currentTime,
-                State:       state,
-                CPUs:        cpus,
-                Memory:      memoryMB,
-                GPUs:        gpus,
-                Nodes:       nodes,
-                Priority:    priority,
-                QoS:         qos,
-                SubmitTime:  submitTime,
-                ArrayTaskID: arrayID,
-                ExitCode:    exitCode,
-                NodeList:    nodeList,
+                JobID:        jobID,
+                User:         user,
+                Partition:    partition,
+                JobName:      job["name"],
+                FirstSeen:    currentTime,
+                LastSeen:     currentTime,
+                State:        state,
+                CPUs:         cpus,
+                Memory:       memoryMB,
+                GPUs:         gpus,
+                Nodes:        nodes,
+                Priority:     priority,
+                QoS:          qos,
+                SubmitTime:   submitTime,
+                ArrayTaskID:  arrayID,
+                ExitCode:     exitCode,
+                NodeList:     nodeList,
+                RunPartition: runPartition,
+                LastCPUTime:  cpuTime,
             }
 
             // Increment submission counter
@@ -632,7 +766,7 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
             // Runtime metrics
             users[user].total_runtime_seconds += cpuTime
             if timeUsed > users[user].max_runtime_seconds {
-                users[user].max_runtime_seconds = cpuTime 
+                users[user].max_runtime_seconds = cpuTime
             }
             users[user].total_timeleft_seconds += timeLeft
 
@@ -680,7 +814,7 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
                 users[user].memory_intensive++
             }
 
-            // Partition metrics
+            // Partition metrics (using submitted partition)
             users[user].partitions[partition+"_running"]++
             users[user].part_cpus[partition] += cpus
             users[user].part_memory[partition] += memoryMB
@@ -696,13 +830,21 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
                 users[user].reserved_cpus += cpus
                 users[user].reserved_nodes += nodes
             }
-            // Add partition runtime tracking
-            users[user].part_runtime[partition] += cpuTime
 
-            // Add partition nodes tracking
+            // Determine where the job actually runs (runPartition)
+            runPartition := getRunPartitionFromNodes(nodeList, nodePartitionMap)
+            if runPartition == "" {
+                // Fallback to submitted partition if we can't determine run partition
+                runPartition = partition
+            }
+
+            // Add partition runtime tracking (using actual execution partition)
+            users[user].part_runtime[runPartition] += cpuTime
+
+            // Add partition nodes tracking (using submitted partition)
             users[user].part_nodes[partition] += nodes
 
-            // Check if near timeout BY PARTITION
+            // Check if near timeout BY PARTITION (using submitted partition)
             if timeLeft > 0 && timeUsed > 0 {
                 percentUsed := (timeUsed / (timeUsed + timeLeft)) * 100
                 if percentUsed > 90 {
@@ -710,7 +852,7 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
                 }
             }
 
-            // Job size classification BY PARTITION
+            // Job size classification BY PARTITION (using submitted partition)
             if cpus < 4 {
                 users[user].part_small_jobs[partition]++
             } else if cpus > 64 {
@@ -943,13 +1085,14 @@ type UsersCollector struct {
     partition_memory   *prometheus.Desc
     partition_gpus     *prometheus.Desc
     partition_wait     *prometheus.Desc
-    partition_runtime      *prometheus.Desc
-    partition_cpus_pending *prometheus.Desc
-    partition_mem_pending  *prometheus.Desc
-    partition_near_timeout *prometheus.Desc
-    partition_small_jobs   *prometheus.Desc
-    partition_large_jobs   *prometheus.Desc
-    partition_nodes        *prometheus.Desc
+    partition_runtime        *prometheus.Desc
+    partition_runtime_total  *prometheus.Desc  // Counter version
+    partition_cpus_pending   *prometheus.Desc
+    partition_mem_pending    *prometheus.Desc
+    partition_near_timeout   *prometheus.Desc
+    partition_small_jobs     *prometheus.Desc
+    partition_large_jobs     *prometheus.Desc
+    partition_nodes          *prometheus.Desc
 
 
     // Group metrics
@@ -1126,8 +1269,11 @@ func NewUsersCollector() *UsersCollector {
             "slurm_user_partition_wait_seconds",
             "Wait time per partition", partLabels, nil),
         partition_runtime: prometheus.NewDesc(
-            "slurm_user_partition_runtime_seconds",
-            "Total runtime seconds per partition", partLabels, nil),
+            "slurm_user_partition_cpu_seconds",
+            "Total CPU-seconds (runtime × CPUs) for currently running jobs per partition", partLabels, nil),
+        partition_runtime_total: prometheus.NewDesc(
+            "slurm_user_partition_cpu_seconds_total",
+            "Cumulative CPU-seconds consumed per partition (counter)", partLabels, nil),
         partition_cpus_pending: prometheus.NewDesc(
             "slurm_user_partition_cpus_pending",
             "Pending CPUs per partition", partLabels, nil),
@@ -1222,6 +1368,7 @@ func (uc *UsersCollector) Describe(ch chan<- *prometheus.Desc) {
     ch <- uc.partition_gpus
     ch <- uc.partition_wait
     ch <- uc.partition_runtime
+    ch <- uc.partition_runtime_total
     ch <- uc.partition_cpus_pending
     ch <- uc.partition_mem_pending
     ch <- uc.partition_near_timeout
@@ -1488,7 +1635,42 @@ func (uc *UsersCollector) Collect(ch chan<- prometheus.Metric) {
                 ch <- prometheus.MustNewConstMetric(uc.partition_runtime,
                     prometheus.GaugeValue, runtime, u, part)
             }
+
+            // Calculate delta and accumulate for counter
+            lastObservedMux.Lock()
+            if lastObservedCPUSeconds[u] == nil {
+                lastObservedCPUSeconds[u] = make(map[string]float64)
+            }
+            lastValue := lastObservedCPUSeconds[u][part]
+
+            // Calculate delta (current - last)
+            delta := runtime - lastValue
+            if delta > 0 {
+                // Accumulate delta into counter
+                cpuSecondsMux.Lock()
+                if userPartitionCPUSeconds[u] == nil {
+                    userPartitionCPUSeconds[u] = make(map[string]float64)
+                }
+                userPartitionCPUSeconds[u][part] += delta
+                cpuSecondsMux.Unlock()
+            }
+
+            // Update last observed value
+            lastObservedCPUSeconds[u][part] = runtime
+            lastObservedMux.Unlock()
         }
+
+        // Emit counter metric
+        cpuSecondsMux.RLock()
+        if userPartitionCPUSeconds[u] != nil {
+            for part, totalCPUSeconds := range userPartitionCPUSeconds[u] {
+                if totalCPUSeconds > 0 {
+                    ch <- prometheus.MustNewConstMetric(uc.partition_runtime_total,
+                        prometheus.CounterValue, totalCPUSeconds, u, part)
+                }
+            }
+        }
+        cpuSecondsMux.RUnlock()
         for part, cpus := range m.part_cpus_pending {
             if cpus > 0 {
                 ch <- prometheus.MustNewConstMetric(uc.partition_cpus_pending,
