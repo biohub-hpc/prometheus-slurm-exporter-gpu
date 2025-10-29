@@ -106,7 +106,7 @@ func (pc *PartitionsCollector) collectRunningJobsWaitTime(ch chan<- prometheus.M
         "-h",                    // No header
         "-r",                    // Expand array jobs
         "-t", "RUNNING",         // Only running jobs
-        "--Format", "jobid,username,partition,submittime,starttime,tres-alloc:100",
+        "--Format", "jobid,username,partition,eligibletime,starttime,tres-alloc:100",
     )
 
     output, err := cmd.Output()
@@ -137,16 +137,16 @@ func (pc *PartitionsCollector) collectRunningJobsWaitTime(ch chan<- prometheus.M
         jobID := fields[0]
         user := fields[1]
         partition := fields[2]
-        submitTimeStr := fields[3]
+        eligibleTimeStr := fields[3]
         startTimeStr := fields[4]
 
         // Everything after the 5th field is TRES allocation
         tresAlloc := strings.Join(fields[5:], " ")
 
         // Parse timestamps (ISO format)
-        submitTime, err := time.Parse("2006-01-02T15:04:05", submitTimeStr)
+        eligibleTime, err := time.Parse("2006-01-02T15:04:05", eligibleTimeStr)
         if err != nil {
-            log.Printf("DEBUG: Failed to parse submit time '%s' for job %s: %v", submitTimeStr, jobID, err)
+            log.Printf("DEBUG: Failed to parse eligible time '%s' for job %s: %v", eligibleTimeStr, jobID, err)
             continue
         }
 
@@ -156,8 +156,8 @@ func (pc *PartitionsCollector) collectRunningJobsWaitTime(ch chan<- prometheus.M
             continue
         }
 
-        // Calculate wait time
-        waitTime := startTime.Sub(submitTime).Seconds()
+        // Calculate wait time (from when job became eligible to when it started)
+        waitTime := startTime.Sub(eligibleTime).Seconds()
         if waitTime < 0 {
             log.Printf("DEBUG: Negative wait time for job %s: %v seconds", jobID, waitTime)
             continue
@@ -362,6 +362,11 @@ func (pc *PartitionsCollector) Describe(ch chan<- *prometheus.Desc) {
 func (pc *PartitionsCollector) Collect(ch chan<- prometheus.Metric) {
         pm := ParsePartitionsMetrics()
         for p := range pm {
+                // Skip overlay partitions to avoid double-counting resources
+                if p == "admin" || p == "preempted" {
+                        continue
+                }
+
                 if pm[p].allocated > 0 {
                         ch <- prometheus.MustNewConstMetric(pc.allocated, prometheus.GaugeValue, pm[p].allocated, p)
                 }
