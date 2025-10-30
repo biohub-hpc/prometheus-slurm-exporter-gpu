@@ -67,9 +67,9 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 		// partition := node[7] - remove asterisk from default partition
 		partition := strings.ReplaceAll(node[7], "*", "")
 
-		// Skip preempted partition to avoid duplicate node entries
+		// Skip preempted and admin partitions to avoid duplicate node entries
 		// This ensures each node appears with its primary partition only
-		if partition == "preempted" {
+		if partition == "preempted" || partition == "admin" {
 			continue
 		}
 
@@ -95,6 +95,10 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 		// nodes[nodeName].gpuOther = gpuOther
 		// nodes[nodeName].gpuTotal = gpuTotal
 		nodes[nodeName].nodeStatus = nodeStatus
+		// warn if nodes[nodeName].partition is already set. This indicates multiple partitions for the same node.
+		if nodes[nodeName].partition != "" && nodes[nodeName].partition != partition {
+			log.Printf("Warning: Node %s appears in multiple partitions: %s and %s", nodeName, nodes[nodeName].partition, partition)
+		}
 		nodes[nodeName].partition = partition
 
 		gpuGres := strings.Split(node[5], ":")
