@@ -16,7 +16,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 package main
 
 import (
-	"log"
+	"github.com/prometheus/common/log"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -73,6 +73,10 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 			continue
 		}
 
+		// Warn if node already exists (should not happen after filtering above)
+		if _, exists := nodes[nodeName]; exists {
+			log.Warnf("Warning: Duplicate node entry found for %s in partition %s", nodeName, partition)
+		}
 		nodes[nodeName] = &NodeMetrics{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", ""}
 
 		memAlloc, _ := strconv.ParseUint(node[1], 10, 64)
@@ -95,10 +99,6 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 		// nodes[nodeName].gpuOther = gpuOther
 		// nodes[nodeName].gpuTotal = gpuTotal
 		nodes[nodeName].nodeStatus = nodeStatus
-		// warn if nodes[nodeName].partition is already set. This indicates multiple partitions for the same node.
-		if nodes[nodeName].partition != "" && nodes[nodeName].partition != partition {
-			log.Printf("Warning: Node %s appears in multiple partitions: %s and %s", nodeName, nodes[nodeName].partition, partition)
-		}
 		nodes[nodeName].partition = partition
 
 		gpuGres := strings.Split(node[5], ":")
