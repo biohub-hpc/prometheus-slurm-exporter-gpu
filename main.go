@@ -47,11 +47,6 @@ var gpuAcct = flag.Bool(
         false,
         "Enable GPUs accounting")
 
-var jobHistory = flag.Bool(
-        "job-history",
-        false,
-        "Enable historical job metrics (may impact performance)")
-
 func main() {
         flag.Parse()
 
@@ -60,16 +55,10 @@ func main() {
                 prometheus.MustRegister(NewGPUsCollector()) // from gpus.go
         }
 
-        // Only enable job history if flag is set (since it can be expensive)
-        if *jobHistory {
-                log.Info("Job history metrics enabled - this may impact performance")
-        }
-
         // The Handler function provides a default handler to expose metrics
         // via an HTTP server. "/metrics" is the usual endpoint for that.
         log.Infof("Starting Server: %s", *listenAddress)
         log.Infof("GPUs Accounting: %t", *gpuAcct)
-        log.Infof("Job History: %t", *jobHistory)
         http.Handle("/metrics", promhttp.Handler())
         log.Fatal(http.ListenAndServe(*listenAddress, nil))
 }
