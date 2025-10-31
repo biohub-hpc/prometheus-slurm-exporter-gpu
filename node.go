@@ -16,7 +16,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 package main
 
 import (
-	"log"
+	"github.com/prometheus/common/log"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -39,6 +39,7 @@ type NodeMetrics struct {
 	gpuOther   uint64
 	gpuTotal   uint64
 	nodeStatus string
+	partition  string
 }
 
 func NodeGetMetrics() map[string]*NodeMetrics {
@@ -57,11 +58,26 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 
 	for _, line := range linesUniq {
 		node := strings.Fields(line)
+		if len(node) < 8 {
+			continue
+		}
 		nodeName := node[0]
 		// nodeStatus := node[4] // mixed, allocated, etc.
 		nodeStatus := strings.ReplaceAll(node[4], "*", "")
+		// partition := node[7] - remove asterisk from default partition
+		partition := strings.ReplaceAll(node[7], "*", "")
 
-		nodes[nodeName] = &NodeMetrics{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ""}
+		// Skip preempted and admin partitions to avoid duplicate node entries
+		// This ensures each node appears with its primary partition only
+		if partition == "preempted" || partition == "admin" {
+			continue
+		}
+
+		// Warn if node already exists (should not happen after filtering above)
+		if _, exists := nodes[nodeName]; exists {
+			log.Warnf("Warning: Duplicate node entry found for %s in partition %s", nodeName, partition)
+		}
+		nodes[nodeName] = &NodeMetrics{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", ""}
 
 		memAlloc, _ := strconv.ParseUint(node[1], 10, 64)
 		memTotal, _ := strconv.ParseUint(node[2], 10, 64)
@@ -83,6 +99,7 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 		// nodes[nodeName].gpuOther = gpuOther
 		// nodes[nodeName].gpuTotal = gpuTotal
 		nodes[nodeName].nodeStatus = nodeStatus
+		nodes[nodeName].partition = partition
 
 		gpuGres := strings.Split(node[5], ":")
 		gpuGresUsed := strings.Split(node[6], ":")
@@ -113,7 +130,7 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 // NodeData executes the sinfo command to get data for each node
 // It returns the output of the sinfo command
 func NodeData() []byte {
-	cmd := exec.Command("sinfo", "-h", "-N", "-O", "NodeList,AllocMem,Memory,CPUsState,StateLong,Gres:30,GresUsed:30")
+	cmd := exec.Command("sinfo", "-h", "-N", "-O", "NodeList,AllocMem,Memory,CPUsState,StateLong,Gres:30,GresUsed:30,Partition")
 	out, err := cmd.Output()
 	if err != nil {
 		log.Fatal(err)
@@ -138,7 +155,7 @@ type NodeCollector struct {
 // NewNodeCollector creates a Prometheus collector to keep all our stats in
 // It returns a set of collections for consumption
 func NewNodeCollector() *NodeCollector {
-	labels := []string{"node", "status"}
+	labels := []string{"node", "status", "partition"}
 
 	return &NodeCollector{
 		cpuAlloc:  prometheus.NewDesc("slurm_node_cpu_alloc", "Allocated CPUs per node", labels, nil),
@@ -173,16 +190,16 @@ func (nc *NodeCollector) Describe(ch chan<- *prometheus.Desc) {
 func (nc *NodeCollector) Collect(ch chan<- prometheus.Metric) {
 	nodes := NodeGetMetrics()
 	for node := range nodes {
-		ch <- prometheus.MustNewConstMetric(nc.cpuAlloc, prometheus.GaugeValue, float64(nodes[node].cpuAlloc), node, nodes[node].nodeStatus)
-		ch <- prometheus.MustNewConstMetric(nc.cpuIdle, prometheus.GaugeValue, float64(nodes[node].cpuIdle), node, nodes[node].nodeStatus)
-		ch <- prometheus.MustNewConstMetric(nc.cpuOther, prometheus.GaugeValue, float64(nodes[node].cpuOther), node, nodes[node].nodeStatus)
-		ch <- prometheus.MustNewConstMetric(nc.cpuTotal, prometheus.GaugeValue, float64(nodes[node].cpuTotal), node, nodes[node].nodeStatus)
-		ch <- prometheus.MustNewConstMetric(nc.gpuAlloc, prometheus.GaugeValue, float64(nodes[node].gpuAlloc), node, nodes[node].nodeStatus)
-		ch <- prometheus.MustNewConstMetric(nc.gpuIdle, prometheus.GaugeValue, float64(nodes[node].gpuIdle), node, nodes[node].nodeStatus)
-		ch <- prometheus.MustNewConstMetric(nc.gpuOther, prometheus.GaugeValue, float64(nodes[node].gpuOther), node, nodes[node].nodeStatus)
-		ch <- prometheus.MustNewConstMetric(nc.gpuTotal, prometheus.GaugeValue, float64(nodes[node].gpuTotal), node, nodes[node].nodeStatus)
-		ch <- prometheus.MustNewConstMetric(nc.memAlloc, prometheus.GaugeValue, float64(nodes[node].memAlloc), node, nodes[node].nodeStatus)
-		ch <- prometheus.MustNewConstMetric(nc.memTotal, prometheus.GaugeValue, float64(nodes[node].memTotal), node, nodes[node].nodeStatus)
-		ch <- prometheus.MustNewConstMetric(nc.statusNew, prometheus.GaugeValue, 0, node, nodes[node].nodeStatus)
+		ch <- prometheus.MustNewConstMetric(nc.cpuAlloc, prometheus.GaugeValue, float64(nodes[node].cpuAlloc), node, nodes[node].nodeStatus, nodes[node].partition)
+		ch <- prometheus.MustNewConstMetric(nc.cpuIdle, prometheus.GaugeValue, float64(nodes[node].cpuIdle), node, nodes[node].nodeStatus, nodes[node].partition)
+		ch <- prometheus.MustNewConstMetric(nc.cpuOther, prometheus.GaugeValue, float64(nodes[node].cpuOther), node, nodes[node].nodeStatus, nodes[node].partition)
+		ch <- prometheus.MustNewConstMetric(nc.cpuTotal, prometheus.GaugeValue, float64(nodes[node].cpuTotal), node, nodes[node].nodeStatus, nodes[node].partition)
+		ch <- prometheus.MustNewConstMetric(nc.gpuAlloc, prometheus.GaugeValue, float64(nodes[node].gpuAlloc), node, nodes[node].nodeStatus, nodes[node].partition)
+		ch <- prometheus.MustNewConstMetric(nc.gpuIdle, prometheus.GaugeValue, float64(nodes[node].gpuIdle), node, nodes[node].nodeStatus, nodes[node].partition)
+		ch <- prometheus.MustNewConstMetric(nc.gpuOther, prometheus.GaugeValue, float64(nodes[node].gpuOther), node, nodes[node].nodeStatus, nodes[node].partition)
+		ch <- prometheus.MustNewConstMetric(nc.gpuTotal, prometheus.GaugeValue, float64(nodes[node].gpuTotal), node, nodes[node].nodeStatus, nodes[node].partition)
+		ch <- prometheus.MustNewConstMetric(nc.memAlloc, prometheus.GaugeValue, float64(nodes[node].memAlloc), node, nodes[node].nodeStatus, nodes[node].partition)
+		ch <- prometheus.MustNewConstMetric(nc.memTotal, prometheus.GaugeValue, float64(nodes[node].memTotal), node, nodes[node].nodeStatus, nodes[node].partition)
+		ch <- prometheus.MustNewConstMetric(nc.statusNew, prometheus.GaugeValue, 0, node, nodes[node].nodeStatus, nodes[node].partition)
 	}
 }
