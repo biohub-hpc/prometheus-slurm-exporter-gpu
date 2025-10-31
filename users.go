@@ -51,6 +51,7 @@ type JobHistoryEntry struct {
     NodeList     string    `json:"node_list"`
     RunPartition string    `json:"run_partition"`   // Actual partition where job ran
     LastCPUTime  float64   `json:"last_cpu_time"`   // Last observed CPU-seconds (timeUsed × CPUs)
+    TimeLimit    float64   `json:"time_limit"`      // Requested time limit in seconds
 }
 
 var (
@@ -62,6 +63,7 @@ var (
     // Counters that accumulate over time
     userJobCounts      map[string]map[string]float64
     countsMux          sync.RWMutex
+    userCountsFile     = userHistoryDir + "/job_counts.json"
 
     // Group mappings (could be loaded from config)
     userGroups         map[string]string  // user -> group mapping
@@ -86,6 +88,7 @@ func init() {
     userGroups = make(map[string]string)
     cachedNodePartitionMap = make(map[string]string)
     loadUserJobHistory()
+    loadUserJobCounts()
     loadUserGroups()
     // Build initial node-partition map
     refreshNodePartitionMap()
@@ -125,6 +128,38 @@ func saveUserJobHistory() {
     os.MkdirAll(userHistoryDir, 0755)
     if err := os.WriteFile(userHistoryFile, data, 0644); err != nil {
         log.Printf("Failed to save job history: %v", err)
+    }
+}
+
+func loadUserJobCounts() {
+    data, err := os.ReadFile(userCountsFile)
+    if err != nil {
+        log.Printf("No existing job counts file: %v", err)
+        return
+    }
+
+    var counts map[string]map[string]float64
+    if err := json.Unmarshal(data, &counts); err != nil {
+        log.Printf("Failed to parse job counts: %v", err)
+        return
+    }
+    userJobCounts = counts
+    log.Printf("Loaded job counts for %d users", len(userJobCounts))
+}
+
+func saveUserJobCounts() {
+    countsMux.RLock()
+    data, err := json.Marshal(userJobCounts)
+    countsMux.RUnlock()
+
+    if err != nil {
+        log.Printf("Failed to marshal job counts: %v", err)
+        return
+    }
+
+    os.MkdirAll(userHistoryDir, 0755)
+    if err := os.WriteFile(userCountsFile, data, 0644); err != nil {
+        log.Printf("Failed to save job counts: %v", err)
     }
 }
 
@@ -483,7 +518,6 @@ type UserJobMetrics struct {
     total_runtime_seconds    float64
     max_runtime_seconds      float64
     total_timeleft_seconds   float64
-    walltime_usage_percent   float64
     jobs_near_timeout        float64  // <10% time remaining
 
     // Priority metrics
@@ -670,6 +704,10 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
             if exitCode != 0 {
                 entry.ExitCode = exitCode
             }
+            // Capture time limit if not already set and job is running or pending with time info
+            if entry.TimeLimit == 0 && timeLeft > 0 {
+                entry.TimeLimit = timeUsed + timeLeft
+            }
         } else {
             // New job detected
             startTime := time.Time{}
@@ -684,6 +722,12 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
                 userJobCounts[user]["started"]++
                 userJobCounts[user]["started_"+partition]++
                 countsMux.Unlock()
+            }
+
+            // Calculate time limit from timeUsed + timeLeft
+            timeLimit := float64(0)
+            if timeLeft > 0 {
+                timeLimit = timeUsed + timeLeft
             }
 
             userJobHistory[jobID] = &JobHistoryEntry{
@@ -707,6 +751,7 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
                 NodeList:     nodeList,
                 RunPartition: runPartition,
                 LastCPUTime:  cpuTime,
+                TimeLimit:    timeLimit,
             }
 
             // Increment submission counter
@@ -772,7 +817,6 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
             // Check if near timeout
             if timeLeft > 0 && timeUsed > 0 {
                 percentUsed := (timeUsed / (timeUsed + timeLeft)) * 100
-                users[user].walltime_usage_percent += percentUsed
                 if percentUsed > 90 {
                     users[user].jobs_near_timeout++
                 }
@@ -910,9 +954,6 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
         if users[user].pending_job_count > 0 {
             users[user].avg_wait_seconds = users[user].total_wait_seconds / users[user].pending_job_count
         }
-        if users[user].running > 0 {
-            users[user].walltime_usage_percent = users[user].walltime_usage_percent / users[user].running
-        }
     }
 
     // Check for completed jobs
@@ -943,8 +984,17 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
 
             // Track total duration
             if duration > 0 {
-                userJobCounts[entry.User]["duration_total"]++
+                userJobCounts[entry.User]["duration_total"] += duration
                 userJobCounts[entry.User]["duration_total_"+entry.Partition] += duration
+            }
+
+            // Calculate walltime efficiency (actual runtime / requested time limit)
+            if entry.TimeLimit > 0 && duration > 0 {
+                efficiency := (duration / entry.TimeLimit) * 100
+                userJobCounts[entry.User]["walltime_efficiency_sum"] += efficiency
+                userJobCounts[entry.User]["walltime_efficiency_sum_"+entry.Partition] += efficiency
+                userJobCounts[entry.User]["walltime_efficiency_count"]++
+                userJobCounts[entry.User]["walltime_efficiency_count_"+entry.Partition]++
             }
             countsMux.Unlock()
         }
@@ -959,6 +1009,7 @@ func ParseUsersMetricsComplete(jobData map[string]map[string]string) map[string]
     userJobHistoryMux.Unlock()
 
     go saveUserJobHistory()
+    go saveUserJobCounts()
 
     return users
 }
@@ -1181,7 +1232,7 @@ func NewUsersCollector() *UsersCollector {
             "Total time left for running jobs", labels, nil),
         walltime_usage_pct: prometheus.NewDesc(
             "slurm_user_walltime_usage_percent",
-            "Average walltime usage percentage", labels, nil),
+            "Average walltime efficiency for completed jobs (actual runtime / requested time limit)", labels, nil),
         jobs_near_timeout: prometheus.NewDesc(
             "slurm_user_jobs_near_timeout",
             "Jobs with <10% time remaining", labels, nil),
@@ -1489,10 +1540,6 @@ func (uc *UsersCollector) Collect(ch chan<- prometheus.Metric) {
             ch <- prometheus.MustNewConstMetric(uc.timeleft_total,
                 prometheus.GaugeValue, m.total_timeleft_seconds, u)
         }
-        if m.walltime_usage_percent > 0 {
-            ch <- prometheus.MustNewConstMetric(uc.walltime_usage_pct,
-                prometheus.GaugeValue, m.walltime_usage_percent, u)
-        }
         if m.jobs_near_timeout > 0 {
             ch <- prometheus.MustNewConstMetric(uc.jobs_near_timeout,
                 prometheus.GaugeValue, m.jobs_near_timeout, u)
@@ -1749,6 +1796,13 @@ func (uc *UsersCollector) Collect(ch chan<- prometheus.Metric) {
                 // Emit aggregated duration across all partitions
                 ch <- prometheus.MustNewConstMetric(uc.job_duration_seconds_total,
                     prometheus.CounterValue, value, user, "all")
+            } else if metric == "walltime_efficiency_sum" {
+                // Calculate and emit average walltime efficiency
+                if counts["walltime_efficiency_count"] > 0 {
+                    avgEfficiency := value / counts["walltime_efficiency_count"]
+                    ch <- prometheus.MustNewConstMetric(uc.walltime_usage_pct,
+                        prometheus.GaugeValue, avgEfficiency, user)
+                }
             }
         }
     }
