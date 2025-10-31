@@ -57,13 +57,13 @@ type JobHistoryEntry struct {
 var (
     userJobHistory     map[string]*JobHistoryEntry
     userJobHistoryMux  sync.RWMutex
-    userHistoryDir     = getEnvOrDefault("SLURM_EXPORTER_DATA_DIR", "/home/mark.potts/slurm-exporter")
-    userHistoryFile    = userHistoryDir + "/job_history.json"
+    userHistoryDir     = getEnvOrDefault("SLURM_EXPORTER_DATA_DIR", "/tmp")
+    userHistoryFile    = userHistoryDir + "/slurm_exporter_job_history.json"
 
     // Counters that accumulate over time
     userJobCounts      map[string]map[string]float64
     countsMux          sync.RWMutex
-    userCountsFile     = userHistoryDir + "/job_counts.json"
+    userCountsFile     = userHistoryDir + "/slurm_exporter_job_counts.json"
 
     // Group mappings (could be loaded from config)
     userGroups         map[string]string  // user -> group mapping
