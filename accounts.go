@@ -16,9 +16,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 package main
 
 import (
-        "io/ioutil"
-        "os/exec"
-        "log"
         "strings"
         "strconv"
         "regexp"
@@ -26,19 +23,7 @@ import (
 )
 
 func AccountsData() []byte {
-        cmd := exec.Command("squeue","-a","-r","-h","-o %A|%a|%T|%C")
-        stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
-	}
-	out, _ := ioutil.ReadAll(stdout)
-	if err := cmd.Wait(); err != nil {
-		log.Fatal(err)
-	}
-	return out
+	return GetCached("squeue_accounts")
 }
 
 type JobMetrics struct {

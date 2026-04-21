@@ -18,6 +18,7 @@ package main
 import (
         "flag"
         "net/http"
+        "time"
         "github.com/prometheus/client_golang/prometheus"
         "github.com/prometheus/client_golang/prometheus/promhttp"
         "github.com/prometheus/common/log"
@@ -53,8 +54,22 @@ var jobHistory = flag.Bool(
         false,
         "Enable historical job metrics (may impact performance)")
 
+var cacheSeconds = flag.Int(
+        "cache-interval",
+        30,
+        "Interval in seconds between background Slurm command refreshes")
+
 func main() {
         flag.Parse()
+
+        // Initialize and fill the Slurm command cache before serving.
+        // This runs all Slurm commands in parallel and caches the output.
+        slurmCache = NewSlurmCache()
+        log.Infof("Performing initial cache refresh (all Slurm commands in parallel)...")
+        slurmCache.RefreshAll(*gpuAcct)
+        log.Infof("Initial cache refresh complete")
+        slurmCache.StartBackgroundRefresh(
+                time.Duration(*cacheSeconds)*time.Second, *gpuAcct)
 
         // Turn on GPUs accounting only if the corresponding command line option is set to true.
         if *gpuAcct {
@@ -71,6 +86,7 @@ func main() {
         log.Infof("Starting Server: %s", *listenAddress)
         log.Infof("GPUs Accounting: %t", *gpuAcct)
         log.Infof("Job History: %t", *jobHistory)
+        log.Infof("Cache Interval: %ds", *cacheSeconds)
         http.Handle("/metrics", promhttp.Handler())
         log.Fatal(http.ListenAndServe(*listenAddress, nil))
 }

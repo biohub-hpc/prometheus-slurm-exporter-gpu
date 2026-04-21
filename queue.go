@@ -17,9 +17,6 @@ package main
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
-	"io/ioutil"
-	"log"
-	"os/exec"
 	"strings"
 )
 
@@ -84,19 +81,7 @@ func ParseQueueMetrics(input []byte) *QueueMetrics {
 
 // Execute the squeue command and return its output
 func QueueData() []byte {
-	cmd := exec.Command("squeue", "-a", "-r", "-h", "-o %A,%T,%r", "--states=all")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
-	}
-	out, _ := ioutil.ReadAll(stdout)
-	if err := cmd.Wait(); err != nil {
-		log.Fatal(err)
-	}
-	return out
+	return GetCached("squeue_queue")
 }
 
 /*

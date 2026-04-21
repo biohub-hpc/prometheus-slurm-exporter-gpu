@@ -15,13 +15,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 
 package main
 
-// Also need to import fmt at the top of the file
 import (
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
-	"io/ioutil"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -53,9 +50,8 @@ func GPUsGetMetrics() *GPUsMetrics {
 func GetNodeGPUMapping() map[string]NodeGPUInfo {
 	nodeGPUs := make(map[string]NodeGPUInfo)
 	
-	// Use sinfo to get node GPU information
-	args := []string{"-h", "-o", "%N %G"}
-	output := string(Execute("sinfo", args))
+	// Use sinfo to get node GPU information (from cache)
+	output := string(GetCached("sinfo_gpu_mapping"))
 	
 	log.Infof("Raw sinfo output:\n%s", output)
 	
@@ -356,10 +352,8 @@ func ParseAllocatedGPUsByTypeAndUser() (float64, map[string]float64, map[string]
 	// Get node to GPU mapping
 	nodeGPUMap := GetNodeGPUMapping()
 
-	// Use squeue with explicit format with proper column widths
-	// Using wide columns to ensure fields don't run together
-	args := []string{"-t", "RUNNING", "-h", "--Format=JobID:20,username:20,tres-alloc:100,tres-per-node:30,NodeList:40"}
-	output := string(Execute("squeue", args))
+	// Use squeue with explicit format with proper column widths (from cache)
+	output := string(GetCached("squeue_gpu_alloc"))
 
 	// Log raw output for debugging
 	lines := strings.Split(output, "\n")
@@ -531,8 +525,7 @@ func parseGPUFromTresPerNode(tresPerNode string) (string, float64, bool) {
 func ParseAllocatedGPUs() float64 {
 	var num_gpus = 0.0
 
-	args := []string{"-a", "-X", "--format=AllocTRES", "--state=RUNNING", "--noheader", "--parsable2"}
-	output := string(Execute("sacct", args))
+	output := string(GetCached("sacct_gpu"))
 	if len(output) > 0 {
 		for _, line := range strings.Split(output, "\n") {
 			if len(line) > 0 {
@@ -556,8 +549,7 @@ func ParseTotalGPUsByType() (float64, map[string]float64) {
 	var totalGPUs = 0.0
 	gpusByType := make(map[string]float64)
 	
-	args := []string{"-h", "-o", "%n %G"}
-	output := string(Execute("sinfo", args))
+	output := string(GetCached("sinfo_gpu_total"))
 	
 	if len(output) > 0 {
 		for _, line := range strings.Split(output, "\n") {
@@ -627,23 +619,6 @@ func ParseGPUsMetrics() *GPUsMetrics {
 	}
 	
 	return &gm
-}
-
-// Execute the sinfo command and return its output
-func Execute(command string, arguments []string) []byte {
-	cmd := exec.Command(command, arguments...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
-	}
-	out, _ := ioutil.ReadAll(stdout)
-	if err := cmd.Wait(); err != nil {
-		log.Fatal(err)
-	}
-	return out
 }
 
 /*

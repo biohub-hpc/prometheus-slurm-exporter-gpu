@@ -1,15 +1,11 @@
 package main
 
 import (
-	// Add this line to import the fmt package
 	"fmt"
 	"log"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
-
-	//"strconv" // Add this line to import the strconv package
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -71,16 +67,9 @@ func ParseGresMetrics(input []byte) map[string]*GresMetrics {
 	return nodes
 }
 
-// NodeData executes the sinfo command to get data for each node
-// It returns the output of the sinfo command
+// GresData returns cached sinfo output with per-node GRES details
 func GresData() []byte {
-	cmd := exec.Command("sinfo", "-h", "-N", "-O", "NodeHost,Gres:50,GresUsed:50,StateLong")
-	// cmd := exec.Command("cat", "test_data/sinfo_cz_gres.txt")
-	out, err := cmd.Output()
-	if err != nil {
-		log.Fatal(err)
-	}
-	return out
+	return GetCached("sinfo_gres")
 }
 
 type GresCollector struct {

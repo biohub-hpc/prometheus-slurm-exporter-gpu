@@ -16,8 +16,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 package main
 
 import (
-        "io/ioutil"
-        "os/exec"
         "log"
         "strings"
         "strconv"
@@ -101,17 +99,9 @@ func getCPUJobSize(cpuCount int) string {
 
 
 func (pc *PartitionsCollector) collectRunningJobsWaitTime(ch chan<- prometheus.Metric) {
-    // Use --Format to get tres-alloc information including user
-    cmd := exec.Command("squeue",
-        "-h",                    // No header
-        "-r",                    // Expand array jobs
-        "-t", "RUNNING",         // Only running jobs
-        "--Format", "jobid,username,partition,eligibletime,starttime,tres-alloc:100",
-    )
-
-    output, err := cmd.Output()
-    if err != nil {
-        log.Printf("ERROR: Failed to execute squeue: %v", err)
+    output := GetCached("squeue_partitions_waittime")
+    if len(output) == 0 {
+        log.Printf("WARN: No cached data for squeue_partitions_waittime")
         return
     }
 
@@ -247,35 +237,11 @@ func parseCPUFromTRES(tres string) int {
 }
 
 func PartitionsData() []byte {
-        cmd := exec.Command("sinfo", "-h", "-o%R,%C")
-        stdout, err := cmd.StdoutPipe()
-        if err != nil {
-                log.Fatal(err)
-        }
-        if err := cmd.Start(); err != nil {
-                log.Fatal(err)
-        }
-        out, _ := ioutil.ReadAll(stdout)
-        if err := cmd.Wait(); err != nil {
-                log.Fatal(err)
-        }
-        return out
+        return GetCached("sinfo_partitions")
 }
 
 func PartitionsPendingJobsData() []byte {
-        cmd := exec.Command("squeue","-a","-r","-h","-o%P","--states=PENDING")
-        stdout, err := cmd.StdoutPipe()
-        if err != nil {
-                log.Fatal(err)
-        }
-        if err := cmd.Start(); err != nil {
-                log.Fatal(err)
-        }
-        out, _ := ioutil.ReadAll(stdout)
-        if err := cmd.Wait(); err != nil {
-                log.Fatal(err)
-        }
-        return out
+        return GetCached("squeue_partitions_pending")
 }
 
 type PartitionMetrics struct {
