@@ -236,3 +236,63 @@ func GetCached(key string) []byte {
 	}
 	return data
 }
+
+// CachingCollector wraps multiple Prometheus collectors and caches their
+// metric output. The heavy parsing work runs in the background via Refresh(),
+// while Collect() instantly replays the pre-built metrics.
+type CachingCollector struct {
+	collectors []prometheus.Collector
+	mu         sync.RWMutex
+	metrics    []prometheus.Metric
+}
+
+func NewCachingCollector(collectors ...prometheus.Collector) *CachingCollector {
+	return &CachingCollector{
+		collectors: collectors,
+	}
+}
+
+// Describe forwards descriptor declarations from all wrapped collectors.
+func (cc *CachingCollector) Describe(ch chan<- *prometheus.Desc) {
+	for _, c := range cc.collectors {
+		c.Describe(ch)
+	}
+}
+
+// Collect replays the pre-built cached metrics instantly.
+func (cc *CachingCollector) Collect(ch chan<- prometheus.Metric) {
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	for _, m := range cc.metrics {
+		ch <- m
+	}
+}
+
+// Refresh runs the real Collect() on all wrapped collectors in the background,
+// capturing the metrics they produce and storing them for fast replay.
+func (cc *CachingCollector) Refresh() {
+	start := time.Now()
+
+	ch := make(chan prometheus.Metric, 100000)
+	done := make(chan struct{})
+
+	var metrics []prometheus.Metric
+	go func() {
+		for m := range ch {
+			metrics = append(metrics, m)
+		}
+		close(done)
+	}()
+
+	for _, c := range cc.collectors {
+		c.Collect(ch)
+	}
+	close(ch)
+	<-done
+
+	cc.mu.Lock()
+	cc.metrics = metrics
+	cc.mu.Unlock()
+
+	log.Infof("Metrics refresh complete in %v (%d metrics cached)", time.Since(start), len(metrics))
+}
