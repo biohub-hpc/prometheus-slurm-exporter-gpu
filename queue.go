@@ -18,8 +18,6 @@ package main
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"strings"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 type QueueMetrics struct {

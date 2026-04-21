@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
+	"github.com/prometheus/common/log"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
