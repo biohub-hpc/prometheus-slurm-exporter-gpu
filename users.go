@@ -17,9 +17,7 @@ package main
 
 import (
     "encoding/json"
-    "io"
     "os"
-    "os/exec"
     "log"
     "strings"
     "strconv"
@@ -90,8 +88,8 @@ func init() {
     loadUserJobHistory()
     loadUserJobCounts()
     loadUserGroups()
-    // Build initial node-partition map
-    refreshNodePartitionMap()
+    // Node-partition map will be populated from cache on first scrape
+    // via getNodePartitionMap() after cache is initialized in main()
 }
 
 func loadUserGroups() {
@@ -284,12 +282,10 @@ func parseSubmitTime(timeStr string) time.Time {
 func refreshNodePartitionMap() {
     nodePartitionMap := make(map[string]string)
 
-    // Use sinfo to get node to partition mapping
-    // Format: NodeList Partition
-    cmd := exec.Command("sinfo", "-h", "-N", "-o", "%N %P")
-    output, err := cmd.Output()
-    if err != nil {
-        log.Printf("Error getting node partition mapping: %v", err)
+    // Get node to partition mapping from cache
+    output := GetCached("sinfo_node_partition_map")
+    if len(output) == 0 {
+        log.Printf("Error getting node partition mapping from cache")
         return
     }
 
@@ -377,28 +373,19 @@ func getRunPartitionFromNodes(nodeList string, nodePartitionMap map[string]strin
 
 // Get extended data from squeue with all fields
 func UsersDataComplete() ([]byte, map[string]map[string]string) {
-    // First get basic job info with standard format that we know works
-    cmd1 := exec.Command("squeue","-a", "-r", "-h",
-        "-o", "%i|%u|%P|%j|%T|%M|%L|%S|%p|%q|%N")
-    
-    output1, err := cmd1.Output()
-    if err != nil {
-        log.Printf("Error getting squeue data: %v", err)
+    // Get basic job info from cache
+    output1 := GetCached("squeue_users_complete")
+    if len(output1) == 0 {
+        log.Printf("Error getting squeue data from cache")
         return []byte{}, make(map[string]map[string]string)
     }
 
-    // Then get TRES data separately with --Format
-    cmd2 := exec.Command("squeue","-a", "-r", "-h",
-        "--Format=JobID:20,tres-alloc:100")
-    
-    output2, err := cmd2.Output()
-    if err != nil {
-        log.Printf("Error getting TRES data: %v", err)
-    }
-    
+    // Get TRES data from cache
+    output2 := GetCached("squeue_users_tres")
+
     // Parse TRES data into a map
     tresMap := make(map[string]string)
-    if err == nil {
+    if len(output2) > 0 {
         tresLines := strings.Split(string(output2), "\n")
         for _, line := range tresLines {
             line = strings.TrimSpace(line)
@@ -480,19 +467,7 @@ func UsersDataComplete() ([]byte, map[string]map[string]string) {
 
 // Keep existing simple function for backward compatibility
 func UsersData() []byte {
-    cmd := exec.Command("squeue","-a", "-r", "-h", "-o", "%A|%u|%T|%C")
-    stdout, err := cmd.StdoutPipe()
-    if err != nil {
-        log.Fatal(err)
-    }
-    if err := cmd.Start(); err != nil {
-        log.Fatal(err)
-    }
-    out, _ := io.ReadAll(stdout)
-    if err := cmd.Wait(); err != nil {
-        log.Fatal(err)
-    }
-    return out
+    return GetCached("squeue_users_basic")
 }
 
 type UserJobMetrics struct {

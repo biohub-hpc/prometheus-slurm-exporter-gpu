@@ -18,37 +18,93 @@ package main
 import (
         "flag"
         "net/http"
+        "time"
         "github.com/prometheus/client_golang/prometheus"
         "github.com/prometheus/client_golang/prometheus/promhttp"
         "github.com/prometheus/common/log"
 )
 
-func init() {
-        // Metrics have to be registered to be exposed
-        prometheus.MustRegister(NewAccountsCollector())   // from accounts.go
-        prometheus.MustRegister(NewCPUsCollector())       // from cpus.go
-        prometheus.MustRegister(NewNodesCollector())      // from nodes.go
-        prometheus.MustRegister(NewNodeCollector())       // from node.go
-        prometheus.MustRegister(NewPartitionsCollector()) // from partitions.go
-        prometheus.MustRegister(NewQueueCollector())      // from queue.go
-        prometheus.MustRegister(NewSchedulerCollector())  // from scheduler.go
-        prometheus.MustRegister(NewUsersCollector())      // from users.go
-        prometheus.MustRegister(NewGPUsCollector())       // from gpus.go
-//        prometheus.MustRegister(NewFairShareCollector())  // from sshare.go
-//        prometheus.MustRegister(NewUserJobsCollector())   // from user_jobs.go - NEW!
-}
+// Collector registration moved to main() to use CachingCollector
 
 var listenAddress = flag.String(
         "listen-address",
         ":8080",
         "The address to listen on for HTTP requests.")
 
+var gpuAcct = flag.Bool(
+        "gpus-acct",
+        false,
+        "Enable GPUs accounting")
+
+var jobHistory = flag.Bool(
+        "job-history",
+        false,
+        "Enable historical job metrics (may impact performance)")
+
+var cacheSeconds = flag.Int(
+        "cache-interval",
+        30,
+        "Interval in seconds between background Slurm command refreshes")
+
 func main() {
         flag.Parse()
+
+        // Initialize and fill the Slurm command cache before serving.
+        // This runs all Slurm commands in parallel and caches the output.
+        slurmCache = NewSlurmCache()
+        log.Infof("Performing initial cache refresh (all Slurm commands in parallel)...")
+        slurmCache.RefreshAll(*gpuAcct)
+        log.Infof("Initial cache refresh complete")
+
+        // Build the list of all collectors
+        collectors := []prometheus.Collector{
+                NewAccountsCollector(),   // from accounts.go
+                NewCPUsCollector(),       // from cpus.go
+                NewNodesCollector(),      // from nodes.go
+                NewNodeCollector(),       // from node.go
+                NewPartitionsCollector(), // from partitions.go
+                NewQueueCollector(),      // from queue.go
+                NewSchedulerCollector(),  // from scheduler.go
+                NewFairShareCollector(),  // from sshare.go
+                NewUsersCollector(),      // from users.go
+                NewGresCollector(),       // from gres.go
+        }
+        if *gpuAcct {
+                collectors = append(collectors, NewGPUsCollector()) // from gpus.go
+        }
+
+        // Wrap all collectors in a CachingCollector that pre-builds metrics
+        // in the background so Prometheus scrapes are instant.
+        cachingCollector := NewCachingCollector(collectors...)
+        prometheus.MustRegister(cachingCollector)
+
+        // Initial metrics parse (runs all Collect methods once)
+        log.Infof("Performing initial metrics parse...")
+        cachingCollector.Refresh()
+        log.Infof("Initial metrics parse complete")
+
+        // Start background refresh: fetch raw data then parse metrics
+        interval := time.Duration(*cacheSeconds) * time.Second
+        go func() {
+                ticker := time.NewTicker(interval)
+                defer ticker.Stop()
+                for range ticker.C {
+                        slurmCache.RefreshAll(*gpuAcct)
+                        cachingCollector.Refresh()
+                }
+        }()
+
+        // Only enable job history if flag is set (since it can be expensive)
+        if *jobHistory {
+                log.Info("Job history metrics enabled - this may impact performance")
+        }
 
         // The Handler function provides a default handler to expose metrics
         // via an HTTP server. "/metrics" is the usual endpoint for that.
         log.Infof("Starting Server: %s", *listenAddress)
+        log.Infof("GPUs Accounting: %t", *gpuAcct)
+        log.Infof("Job History: %t", *jobHistory)
+        log.Infof("Cache Interval: %ds", *cacheSeconds)
         http.Handle("/metrics", promhttp.Handler())
         log.Fatal(http.ListenAndServe(*listenAddress, nil))
 }

@@ -16,28 +16,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 package main
 
 import (
-        "io/ioutil"
-        "os/exec"
-        "log"
         "strings"
         "strconv"
         "github.com/prometheus/client_golang/prometheus"
 )
 
 func FairShareData() []byte {
-        cmd := exec.Command( "sshare", "-n", "-P", "-o", "account,fairshare" )
-        stdout, err := cmd.StdoutPipe()
-        if err != nil {
-                log.Fatal(err)
-        }
-        if err := cmd.Start(); err != nil {
-                log.Fatal(err)
-        }
-        out, _ := ioutil.ReadAll(stdout)
-        if err := cmd.Wait(); err != nil {
-                log.Fatal(err)
-        }
-        return out
+        return GetCached("sshare")
 }
 
 type FairShareMetrics struct {

@@ -16,8 +16,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 package main
 
 import (
-	"github.com/prometheus/common/log"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -127,15 +125,9 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 	return nodes
 }
 
-// NodeData executes the sinfo command to get data for each node
-// It returns the output of the sinfo command
+// NodeData returns cached sinfo output with per-node details
 func NodeData() []byte {
-	cmd := exec.Command("sinfo", "-h", "-N", "-O", "NodeList,AllocMem,Memory,CPUsState,StateLong,Gres:30,GresUsed:30,Partition")
-	out, err := cmd.Output()
-	if err != nil {
-		log.Fatal(err)
-	}
-	return out
+	return GetCached("sinfo_node")
 }
 
 type NodeCollector struct {

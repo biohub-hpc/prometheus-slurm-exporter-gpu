@@ -15,13 +15,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 
 package main
 
-// Also need to import fmt at the top of the file
 import (
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
-	"io/ioutil"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -53,9 +50,8 @@ func GPUsGetMetrics() *GPUsMetrics {
 func GetNodeGPUMapping() map[string]NodeGPUInfo {
 	nodeGPUs := make(map[string]NodeGPUInfo)
 	
-	// Use sinfo to get node GPU information
-	args := []string{"-h", "-o", "%N %G"}
-	output := string(Execute("sinfo", args))
+	// Use sinfo to get node GPU information (from cache)
+	output := string(GetCached("sinfo_gpu_mapping"))
 	
 	log.Infof("Raw sinfo output:\n%s", output)
 	
@@ -277,18 +273,88 @@ func expandRange(prefix, rangeStr, suffix string) []string {
 	return nodes
 }
 
+// Helper function to process a single GPU job
+func processGPUJob(jobid, user, tresAlloc, tresPerNode, nodeList string, gpusRequested float64,
+	gpuJobCount *int, totalGPUs *float64,
+	gpusByType map[string]float64,
+	gpusByUserAndType map[string]map[string]float64,
+	nodeGPUMap map[string]NodeGPUInfo) {
+
+	*gpuJobCount++
+
+	// Parse tres-per-node to see if we have GPU type and per-node count
+	tresGpuType, tresGpuCount, hasTresPerNode := parseGPUFromTresPerNode(tresPerNode)
+
+	// Expand the node list
+	nodes := expandNodeList(nodeList)
+
+	// Track GPUs by type for this job
+	jobGpusByType := make(map[string]float64)
+	gpuNodesFound := 0
+
+	// Filter 2: Iterate through all nodes, only process those in nodeGPUMap
+	for _, node := range nodes {
+		nodeInfo, exists := nodeGPUMap[node]
+		if !exists {
+			// Skip nodes not in GPU map (e.g., cpu-* nodes)
+			continue
+		}
+
+		gpuNodesFound++
+
+		// Determine GPU type for this node
+		gpuType := nodeInfo.gpuType
+		if hasTresPerNode && tresGpuType != "" {
+			// Use type from tres-per-node if available
+			gpuType = tresGpuType
+		}
+
+		// Determine GPU count for this node
+		var gpuCountThisNode float64
+		if hasTresPerNode && tresGpuCount > 0 {
+			// Use per-node count from tres-per-node
+			gpuCountThisNode = tresGpuCount
+		} else if gpuNodesFound > 0 {
+			// Divide total GPUs evenly across GPU nodes
+			gpuCountThisNode = gpusRequested / float64(len(nodes))
+		}
+
+		jobGpusByType[gpuType] += gpuCountThisNode
+	}
+
+	// Filter 3: Only accumulate if we found at least one GPU node
+	if gpuNodesFound > 0 {
+		for gpuType, count := range jobGpusByType {
+			*totalGPUs += count
+			gpusByType[gpuType] += count
+
+			if _, exists := gpusByUserAndType[user]; !exists {
+				gpusByUserAndType[user] = make(map[string]float64)
+			}
+			gpusByUserAndType[user][gpuType] += count
+		}
+
+		// Log first few GPU jobs for debugging
+		if *gpuJobCount <= 10 {
+			log.Debugf("GPU Job %s: user=%s, nodes=%s, tres-per-node=%s, gpu_allocation=%v",
+				jobid, user, nodeList, tresPerNode, jobGpusByType)
+		}
+	} else {
+		log.Warnf("Could not determine GPU type for job %s on nodes %s (no nodes in GPU map)", jobid, nodeList)
+	}
+}
+
 func ParseAllocatedGPUsByTypeAndUser() (float64, map[string]float64, map[string]map[string]float64) {
 	var totalGPUs = 0.0
 	gpusByType := make(map[string]float64)
 	gpusByUserAndType := make(map[string]map[string]float64)
-	
+
 	// Get node to GPU mapping
 	nodeGPUMap := GetNodeGPUMapping()
-	
-	// Simple squeue command - when run as root, includes TRES_ALLOC
-	args := []string{"-t", "RUNNING", "-h"}
-	output := string(Execute("squeue", args))
-	
+
+	// Use squeue with explicit format with proper column widths (from cache)
+	output := string(GetCached("squeue_gpu_alloc"))
+
 	// Log raw output for debugging
 	lines := strings.Split(output, "\n")
 	log.Infof("=== Raw squeue output (first 10 lines) ===")
@@ -298,85 +364,75 @@ func ParseAllocatedGPUsByTypeAndUser() (float64, map[string]float64, map[string]
 		}
 	}
 	log.Infof("Total squeue lines: %d", len(lines))
-	
+
 	log.Infof("=== Processing Running Jobs ===")
 	jobCount := 0
 	gpuJobCount := 0
-	
+
 	if len(output) > 0 {
 		for _, line := range lines {
 			if line == "" {
 				continue
 			}
-			
-			// Default squeue format has TRES_ALLOC in a predictable position
-			// We need to parse carefully since TRES field contains commas
-			fields := strings.Fields(line)
-			if len(fields) < 8 {
-				continue
-			}
-			
-			// Fields: JOBID USER PARTITION NAME ST TIME_LEFT TRES_ALLOC NODELIST
-			jobid := fields[0]
-			user := fields[1]
-			partition := fields[2]
-			
-			// Find the TRES field - it contains "cpu=X,mem=X,..." pattern
-			tresField := ""
-			nodeField := ""
-			for i, field := range fields {
-				if strings.Contains(field, "cpu=") && strings.Contains(field, "mem=") {
-					tresField = field
-					// NodeList is the next field after TRES
-					if i+1 < len(fields) {
-						nodeField = fields[i+1]
-					}
-					break
+
+			// Format: JOBID(20) username(20) tres-alloc(100) tres-per-node(30) NodeList(40)
+			// Parse by position since fields have fixed widths
+			if len(line) < 170 {
+				// Line too short, try field-based parsing as fallback
+				fields := strings.Fields(line)
+				if len(fields) < 5 {
+					continue
 				}
-			}
-			
-			if tresField == "" {
-				continue
-			}
-			
-			jobCount++
-			
-			// Parse GPU count from TRES
-			gpusRequested := parseGPUFromTRES(tresField)
-			
-			if gpusRequested > 0 {
-				gpuJobCount++
-				
-				// Get GPU type from node
-				nodes := expandNodeList(nodeField)
-				
-				// Determine GPU type from first node
-				gpuType := ""
-				for _, node := range nodes {
-					if nodeInfo, exists := nodeGPUMap[node]; exists {
-						gpuType = nodeInfo.gpuType
+				jobid := fields[0]
+				user := fields[1]
+				// TRES can contain commas, so we need to find it carefully
+				// Look for the pattern that starts with "cpu=" or "billing="
+				tresStart := -1
+				tresEnd := -1
+				for i := 2; i < len(fields); i++ {
+					if strings.Contains(fields[i], "cpu=") || strings.Contains(fields[i], "billing=") {
+						tresStart = i
+					}
+					if tresStart >= 0 && (strings.HasPrefix(fields[i], "gres/gpu") || fields[i] == "N/A") {
+						tresEnd = i
 						break
 					}
 				}
-				
-				if gpuType != "" {
-					totalGPUs += gpusRequested
-					gpusByType[gpuType] += gpusRequested
-					
-					if _, exists := gpusByUserAndType[user]; !exists {
-						gpusByUserAndType[user] = make(map[string]float64)
-					}
-					gpusByUserAndType[user][gpuType] += gpusRequested
-					
-					// Log first few GPU jobs for debugging
-					if gpuJobCount <= 10 {
-						log.Debugf("GPU Job %s: user=%s, partition=%s, node=%s, gpu_type=%s, gpus=%v", 
-							jobid, user, partition, nodeField, gpuType, gpusRequested)
-					}
-				} else {
-					log.Warnf("Could not determine GPU type for job %s on node %s", jobid, nodeField)
+				if tresStart < 0 || tresEnd < 0 || tresEnd >= len(fields)-1 {
+					continue
 				}
+				tresAlloc := fields[tresStart]
+				tresPerNode := fields[tresEnd]
+				nodeList := fields[tresEnd+1]
+
+				jobCount++
+				gpusRequested := parseGPUFromTRES(tresAlloc)
+				if gpusRequested == 0 {
+					continue
+				}
+
+				processGPUJob(jobid, user, tresAlloc, tresPerNode, nodeList, gpusRequested,
+					&gpuJobCount, &totalGPUs, gpusByType, gpusByUserAndType, nodeGPUMap)
+				continue
 			}
+
+			// Fixed-width parsing
+			jobid := strings.TrimSpace(line[0:20])
+			user := strings.TrimSpace(line[20:40])
+			tresAlloc := strings.TrimSpace(line[40:140])
+			tresPerNode := strings.TrimSpace(line[140:170])
+			nodeList := strings.TrimSpace(line[170:])
+
+			jobCount++
+
+			// Filter 1: Only process jobs with GPUs in TRES (skips cpu-* jobs)
+			gpusRequested := parseGPUFromTRES(tresAlloc)
+			if gpusRequested == 0 {
+				continue
+			}
+
+			processGPUJob(jobid, user, tresAlloc, tresPerNode, nodeList, gpusRequested,
+				&gpuJobCount, &totalGPUs, gpusByType, gpusByUserAndType, nodeGPUMap)
 		}
 	}
 	
@@ -422,11 +478,54 @@ func parseGPUFromTRES(tres string) float64 {
         return 0
 }
 
+// Parse GPU type and count from TRES-per-node format
+// Returns: (gpuType, gpuCount, ok)
+// Formats: "gres/gpu:TYPE:COUNT" or "gres/gpu:COUNT" or "N/A"
+func parseGPUFromTresPerNode(tresPerNode string) (string, float64, bool) {
+	if tresPerNode == "" || tresPerNode == "N/A" {
+		return "", 0, false
+	}
+
+	// Look for gres/gpu in the string
+	if !strings.Contains(tresPerNode, "gres/gpu") {
+		return "", 0, false
+	}
+
+	// Extract the gres/gpu part (might have other TRES too)
+	for _, item := range strings.Split(tresPerNode, ",") {
+		item = strings.TrimSpace(item)
+		if strings.HasPrefix(item, "gres/gpu:") || strings.HasPrefix(item, "gres/gpu=") {
+			// Remove the prefix
+			gpuPart := strings.TrimPrefix(item, "gres/gpu:")
+			gpuPart = strings.TrimPrefix(gpuPart, "gres/gpu=")
+
+			// Split by colon to get type and count
+			parts := strings.Split(gpuPart, ":")
+
+			if len(parts) == 2 {
+				// Format: TYPE:COUNT
+				gpuType := parts[0]
+				count, err := strconv.ParseFloat(parts[1], 64)
+				if err == nil {
+					return gpuType, count, true
+				}
+			} else if len(parts) == 1 {
+				// Format: COUNT (no type specified)
+				count, err := strconv.ParseFloat(parts[0], 64)
+				if err == nil {
+					return "", count, true
+				}
+			}
+		}
+	}
+
+	return "", 0, false
+}
+
 func ParseAllocatedGPUs() float64 {
 	var num_gpus = 0.0
 
-	args := []string{"-a", "-X", "--format=AllocTRES", "--state=RUNNING", "--noheader", "--parsable2"}
-	output := string(Execute("sacct", args))
+	output := string(GetCached("sacct_gpu"))
 	if len(output) > 0 {
 		for _, line := range strings.Split(output, "\n") {
 			if len(line) > 0 {
@@ -450,8 +549,7 @@ func ParseTotalGPUsByType() (float64, map[string]float64) {
 	var totalGPUs = 0.0
 	gpusByType := make(map[string]float64)
 	
-	args := []string{"-h", "-o", "%n %G"}
-	output := string(Execute("sinfo", args))
+	output := string(GetCached("sinfo_gpu_total"))
 	
 	if len(output) > 0 {
 		for _, line := range strings.Split(output, "\n") {
@@ -521,23 +619,6 @@ func ParseGPUsMetrics() *GPUsMetrics {
 	}
 	
 	return &gm
-}
-
-// Execute the sinfo command and return its output
-func Execute(command string, arguments []string) []byte {
-	cmd := exec.Command(command, arguments...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
-	}
-	out, _ := ioutil.ReadAll(stdout)
-	if err := cmd.Wait(); err != nil {
-		log.Fatal(err)
-	}
-	return out
 }
 
 /*

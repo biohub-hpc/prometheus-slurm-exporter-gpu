@@ -17,9 +17,6 @@ package main
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
-	"io/ioutil"
-	"log"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -49,19 +46,7 @@ func ParseCPUsMetrics(input []byte) *CPUsMetrics {
 
 // Execute the sinfo command and return its output
 func CPUsData() []byte {
-	cmd := exec.Command("sinfo", "-h", "-o %C")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
-	}
-	out, _ := ioutil.ReadAll(stdout)
-	if err := cmd.Wait(); err != nil {
-		log.Fatal(err)
-	}
-	return out
+	return GetCached("sinfo_cpus")
 }
 
 /*
