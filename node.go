@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
+	"github.com/prometheus/common/log"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -65,12 +65,16 @@ func ParseNodeMetrics(input []byte) map[string]*NodeMetrics {
 		// partition := node[7] - remove asterisk from default partition
 		partition := strings.ReplaceAll(node[7], "*", "")
 
-		// Skip preempted partition to avoid duplicate node entries
+		// Skip preempted and admin partitions to avoid duplicate node entries
 		// This ensures each node appears with its primary partition only
-		if partition == "preempted" {
+		if partition == "preempted" || partition == "admin" {
 			continue
 		}
 
+		// Warn if node already exists (should not happen after filtering above)
+		if _, exists := nodes[nodeName]; exists {
+			log.Warnf("Warning: Duplicate node entry found for %s in partition %s", nodeName, partition)
+		}
 		nodes[nodeName] = &NodeMetrics{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", ""}
 
 		memAlloc, _ := strconv.ParseUint(node[1], 10, 64)

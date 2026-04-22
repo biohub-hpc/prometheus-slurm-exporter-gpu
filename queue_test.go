@@ -28,7 +28,29 @@ func TestParseQueueMetrics(t *testing.T) {
 		t.Fatalf("Can not open test data: %v", err)
 	}
 	data, err := ioutil.ReadAll(file)
-	t.Logf("%+v", ParseQueueMetrics(data))
+	metrics := ParseQueueMetrics(data)
+
+	// Verify expected counts (terminal states should be ignored)
+	if metrics.pending != 4 {
+		t.Errorf("Expected 4 pending jobs, got %f", metrics.pending)
+	}
+	if metrics.pending_dep != 0 {
+		t.Errorf("Expected 0 pending_dep jobs, got %f", metrics.pending_dep)
+	}
+	if metrics.running != 28 {
+		t.Errorf("Expected 28 running jobs, got %f", metrics.running)
+	}
+	if metrics.suspended != 1 {
+		t.Errorf("Expected 1 suspended job, got %f", metrics.suspended)
+	}
+	if metrics.completing != 2 {
+		t.Errorf("Expected 2 completing jobs, got %f", metrics.completing)
+	}
+	if metrics.configuring != 1 {
+		t.Errorf("Expected 1 configuring job, got %f", metrics.configuring)
+	}
+
+	t.Logf("%+v", metrics)
 }
 
 func TestQueueGetMetrics(t *testing.T) {
