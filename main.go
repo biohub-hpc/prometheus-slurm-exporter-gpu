@@ -31,16 +31,6 @@ var listenAddress = flag.String(
         ":8080",
         "The address to listen on for HTTP requests.")
 
-var gpuAcct = flag.Bool(
-        "gpus-acct",
-        false,
-        "Enable GPUs accounting")
-
-var jobHistory = flag.Bool(
-        "job-history",
-        false,
-        "Enable historical job metrics (may impact performance)")
-
 var cacheSeconds = flag.Int(
         "cache-interval",
         30,
@@ -53,7 +43,7 @@ func main() {
         // This runs all Slurm commands in parallel and caches the output.
         slurmCache = NewSlurmCache()
         log.Infof("Performing initial cache refresh (all Slurm commands in parallel)...")
-        slurmCache.RefreshAll(*gpuAcct)
+        slurmCache.RefreshAll(true)
         log.Infof("Initial cache refresh complete")
 
         // Build the list of all collectors
@@ -68,9 +58,7 @@ func main() {
                 NewFairShareCollector(),  // from sshare.go
                 NewUsersCollector(),      // from users.go
                 NewGresCollector(),       // from gres.go
-        }
-        if *gpuAcct {
-                collectors = append(collectors, NewGPUsCollector()) // from gpus.go
+                NewGPUsCollector(),       // from gpus.go
         }
 
         // Wrap all collectors in a CachingCollector that pre-builds metrics
@@ -89,21 +77,14 @@ func main() {
                 ticker := time.NewTicker(interval)
                 defer ticker.Stop()
                 for range ticker.C {
-                        slurmCache.RefreshAll(*gpuAcct)
+                        slurmCache.RefreshAll(true)
                         cachingCollector.Refresh()
                 }
         }()
 
-        // Only enable job history if flag is set (since it can be expensive)
-        if *jobHistory {
-                log.Info("Job history metrics enabled - this may impact performance")
-        }
-
         // The Handler function provides a default handler to expose metrics
         // via an HTTP server. "/metrics" is the usual endpoint for that.
         log.Infof("Starting Server: %s", *listenAddress)
-        log.Infof("GPUs Accounting: %t", *gpuAcct)
-        log.Infof("Job History: %t", *jobHistory)
         log.Infof("Cache Interval: %ds", *cacheSeconds)
         http.Handle("/metrics", promhttp.Handler())
         log.Fatal(http.ListenAndServe(*listenAddress, nil))
