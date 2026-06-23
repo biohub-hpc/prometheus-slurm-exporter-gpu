@@ -374,7 +374,7 @@
         {
           "refId": "B",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "avg_over_time(\n  count by (user) (\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n  )[$__range:]\n)",
+          "expr": "avg_over_time(\n  count by (user) (\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n  )[$__range:]\n) > 0.1",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto"
@@ -391,7 +391,7 @@
       "transformations": [
         {
           "id": "joinByField",
-          "options": { "byField": "user", "mode": "outer" }
+          "options": { "byField": "user", "mode": "inner" }
         },
         {
           "id": "organize",
