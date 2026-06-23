@@ -20,6 +20,150 @@
   "liveNow": false,
   "panels": [
     {
+      "id": 10,
+      "type": "stat",
+      "title": "GPUs in service",
+      "description": "Total GPU count across the cluster, excluding titanrtx/titanxp (off-cluster).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(slurm_gpus_total_by_type{gpu_type!~\"titanrtx|titanxp\"})",
+          "instant": true,
+          "legendFormat": "__auto"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Avg concurrent GPUs allocated (window)",
+      "description": "Average over the dashboard time window of (total GPUs allocated to running jobs at each instant). Computed correctly by summing across users first, then averaging over time.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "avg_over_time(sum(slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"})[$__range:])",
+          "instant": true,
+          "legendFormat": "__auto"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1,
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Avg cluster utilization (window)",
+      "description": "Average over the window of (sum of DCGM util / sum of allocated GPUs). Allocation-weighted, only counts time when GPUs were actually held by jobs.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "avg_over_time(\n  (sum(DCGM_FI_DEV_GPU_UTIL * on(Hostname, gpu) group_left slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"})\n   / sum(slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}))[$__range:]\n)",
+          "instant": true,
+          "legendFormat": "__auto"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 30 },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 70 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Avg underutilized GPU-eq (window)",
+      "description": "Average GPU-equivalents that were allocated but idle. Computed as avg_over_time of sum((1 - util/100) per allocated GPU). Concrete units of waste.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "avg_over_time(\n  sum((1 - DCGM_FI_DEV_GPU_UTIL/100)\n      * on(Hostname, gpu) group_left\n        slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"})[$__range:]\n)",
+          "instant": true,
+          "legendFormat": "__auto"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "orange", "value": 60 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
       "id": 1,
       "type": "timeseries",
       "title": "GPU utilization by GPU type",
@@ -28,7 +172,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
       "targets": [
         {
           "refId": "A",
@@ -74,7 +218,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
       "targets": [
         {
           "refId": "A",
@@ -119,7 +263,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 13 },
       "targets": [
         {
           "refId": "A",
@@ -172,7 +316,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 13 },
       "targets": [
         {
           "refId": "A",
@@ -212,12 +356,12 @@
       "id": 5,
       "type": "table",
       "title": "User GPU efficiency over selected time window (sorted: worst utilization first)",
-      "description": "For each user with allocations during the time window: average GPU utilization (DCGM) and average concurrent GPUs allocated. The 'wasted GPU-eq' column is avg_gpus × (1 - util/100), i.e. how many GPUs were effectively idle on average. Sort by any column.",
+      "description": "For each user with allocations during the time window: average GPU utilization (DCGM) and average concurrent GPUs allocated. The 'underutilized GPU-eq' column is avg_gpus × (1 - util/100), i.e. how many GPUs were effectively idle on average. Sort by any column. Note: the headline 'avg underutilized GPU-eq' stat at the top is the correct cluster-wide total; summing this column across users in the table over-counts time when users had non-overlapping allocations.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 18 },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 22 },
       "targets": [
         {
           "refId": "A",
@@ -234,6 +378,14 @@
           "format": "table",
           "instant": true,
           "legendFormat": "__auto"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "topk by (user) (1,\n  sum by (user, project) (\n    slurm_gpus_running_by_project{user=~\"$user\"}\n  )\n)",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto"
         }
       ],
       "transformations": [
@@ -247,16 +399,21 @@
             "excludeByName": {
               "Time 1": true,
               "Time 2": true,
+              "Time 3": true,
               "__name__": true,
               "job 1": true,
               "job 2": true,
+              "job 3": true,
               "instance 1": true,
-              "instance 2": true
+              "instance 2": true,
+              "instance 3": true,
+              "Value #C": true
             },
             "indexByName": {
               "user": 0,
-              "Value #A": 1,
-              "Value #B": 2
+              "project": 1,
+              "Value #A": 2,
+              "Value #B": 3
             },
             "renameByName": {
               "Value #A": "avg util %",
@@ -300,7 +457,7 @@
               "right": "used GPU-eq"
             },
             "reduce": { "reducer": "sum" },
-            "alias": "wasted GPU-eq"
+            "alias": "underutilized GPU-eq"
           }
         },
         {
@@ -309,9 +466,10 @@
             "excludeByName": { "_used_gpu_eq": true, "used GPU-eq": true },
             "indexByName": {
               "user": 0,
-              "avg util %": 1,
-              "avg GPUs allocated": 2,
-              "wasted GPU-eq": 3
+              "project": 1,
+              "avg util %": 2,
+              "avg GPUs allocated": 3,
+              "underutilized GPU-eq": 4
             },
             "renameByName": {}
           }
@@ -319,7 +477,7 @@
         {
           "id": "sortBy",
           "options": {
-            "sort": [{ "field": "wasted GPU-eq", "desc": true }]
+            "sort": [{ "field": "underutilized GPU-eq", "desc": true }]
           }
         }
       ],
@@ -368,7 +526,7 @@
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "wasted GPU-eq" },
+            "matcher": { "id": "byName", "options": "underutilized GPU-eq" },
             "properties": [
               { "id": "unit", "value": "short" },
               { "id": "decimals", "value": 1 },
@@ -395,9 +553,8 @@
       "options": {
         "showHeader": true,
         "footer": {
-          "show": true,
-          "reducer": ["sum"],
-          "fields": ["avg GPUs allocated", "wasted GPU-eq"]
+          "show": false,
+          "reducer": ["sum"]
         }
       }
     }
