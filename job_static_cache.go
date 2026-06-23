@@ -109,9 +109,20 @@ func (c *JobStaticCache) Refresh() {
 		return
 	}
 
+	// The full-scan branch of fetchScontrolForJobs returns every job
+	// slurmctld knows about (including pending, completing, etc.). Filter to
+	// the running set so we don't cache non-running jobs.
+	wanted := make(map[int]bool, len(newIDs))
+	for _, id := range newIDs {
+		wanted[id] = true
+	}
+
 	infos := parseScontrolJobs(output)
 	c.mu.Lock()
 	for _, info := range infos {
+		if !wanted[info.JobID] {
+			continue
+		}
 		c.entries[info.JobID] = info
 	}
 	c.lastDiff = time.Now()
