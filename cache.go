@@ -43,6 +43,10 @@ type CmdSpec struct {
 	Key  string
 	Cmd  string
 	Args []string
+	// RefreshInterval, if non-zero, causes RefreshAll to skip this command
+	// unless the cached entry is older than the interval. Used for expensive
+	// commands (e.g. `scontrol -d show job`) that don't need to run every cycle.
+	RefreshInterval time.Duration
 }
 
 // Observability metrics for the cache itself
@@ -119,6 +123,8 @@ func allCommands(gpuEnabled bool) []CmdSpec {
 			{Key: "sacct_gpu", Cmd: "sacct", Args: []string{"-a", "-X", "--format=AllocTRES",
 				"--state=RUNNING", "--noheader", "--parsable2"}},
 			{Key: "sinfo_gpu_total", Cmd: "sinfo", Args: []string{"-h", "-o", "%n %G"}},
+			{Key: "scontrol_job_gres", Cmd: "scontrol", Args: []string{"-d", "show", "job"},
+				RefreshInterval: 60 * time.Second},
 		}...)
 	}
 
@@ -187,6 +193,14 @@ func (c *SlurmCache) RefreshAll(gpuEnabled bool) {
 	log.Infof("Cache refresh starting: %d commands", len(cmds))
 
 	for _, spec := range cmds {
+		if spec.RefreshInterval > 0 {
+			c.mu.RLock()
+			entry, ok := c.entries[spec.Key]
+			c.mu.RUnlock()
+			if ok && entry.Output != nil && time.Since(entry.LastUpdate) < spec.RefreshInterval {
+				continue
+			}
+		}
 		wg.Add(1)
 		go func(s CmdSpec) {
 			defer wg.Done()
