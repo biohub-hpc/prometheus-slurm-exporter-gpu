@@ -1,0 +1,278 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Production Prometheus (monitoring:9090) — needs both DCGM_FI_DEV_GPU_UTIL and slurm_job_gpu_index / slurm_user_partition_gpus_running.",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "GPU utilization by GPU type",
+      "description": "Average DCGM utilization across all allocated GPUs of each type. Idle (unallocated) GPUs are excluded by the slurm_job_gpu_index join.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "avg by (gpu_type) (\n  DCGM_FI_DEV_GPU_UTIL\n  * on(Hostname, gpu) group_left(user, gpu_type)\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n)",
+          "legendFormat": "{{gpu_type}}",
+          "interval": "1m"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "mode": "none", "group": "A" }
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "GPU utilization by user (top 10)",
+      "description": "Average DCGM utilization across each user's currently-allocated GPUs. Use this to identify users with idle allocations.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "topk(10,\n  avg by (user) (\n    DCGM_FI_DEV_GPU_UTIL\n    * on(Hostname, gpu) group_left(user, gpu_type)\n      slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n  )\n)",
+          "legendFormat": "{{user}}",
+          "interval": "1m"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "GPUs in use by partition",
+      "description": "Count of GPUs currently allocated to jobs, grouped by partition. Sourced from slurm_user_partition_gpus_running (no DCGM join — pure allocation count).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (partition) (\n  slurm_user_partition_gpus_running{user=~\"$user\", partition=~\"$partition\"}\n)",
+          "legendFormat": "{{partition}}",
+          "interval": "1m"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "mode": "normal", "group": "A" }
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["mean", "max", "last"]
+        },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "GPUs in use by partition × user (top 15)",
+      "description": "Stacked view broken down by user, useful for spotting who's holding GPUs on each partition.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "topk(15,\n  sum by (user, partition) (\n    slurm_user_partition_gpus_running{user=~\"$user\", partition=~\"$partition\"}\n  )\n)",
+          "legendFormat": "{{user}} / {{partition}}",
+          "interval": "1m"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "mode": "normal", "group": "A" }
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["mean", "max", "last"]
+        },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["slurm", "gpu", "dcgm"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "label": "Prometheus",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false
+      },
+      {
+        "name": "user",
+        "type": "query",
+        "label": "User",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": { "query": "label_values(slurm_job_gpu_index, user)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "hide": 0,
+        "skipUrlSync": false,
+        "sort": 1
+      },
+      {
+        "name": "gpu_type",
+        "type": "query",
+        "label": "GPU type",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": { "query": "label_values(slurm_job_gpu_index, gpu_type)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "hide": 0,
+        "skipUrlSync": false,
+        "sort": 1
+      },
+      {
+        "name": "partition",
+        "type": "custom",
+        "label": "Partition",
+        "query": "interactive,gpu,preempted,cpu",
+        "current": { "selected": true, "text": ["interactive", "gpu", "preempted"], "value": ["interactive", "gpu", "preempted"] },
+        "options": [
+          { "selected": false, "text": "interactive", "value": "interactive" },
+          { "selected": false, "text": "gpu", "value": "gpu" },
+          { "selected": false, "text": "preempted", "value": "preempted" },
+          { "selected": false, "text": "cpu", "value": "cpu" }
+        ],
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Slurm GPU Utilization",
+  "uid": "slurm-gpu-utilization",
+  "version": 1,
+  "weekStart": ""
+}
