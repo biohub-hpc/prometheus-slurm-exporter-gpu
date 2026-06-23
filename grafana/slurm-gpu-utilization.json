@@ -207,6 +207,199 @@
         },
         "tooltip": { "mode": "multi", "sort": "desc" }
       }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "User GPU efficiency over selected time window (sorted: worst utilization first)",
+      "description": "For each user with allocations during the time window: average GPU utilization (DCGM) and average concurrent GPUs allocated. The 'wasted GPU-eq' column is avg_gpus × (1 - util/100), i.e. how many GPUs were effectively idle on average. Sort by any column.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "avg by (user) (\n  avg_over_time(\n    (DCGM_FI_DEV_GPU_UTIL\n      * on(Hostname, gpu) group_left(user, gpu_type)\n        slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"})[$__range:]\n  )\n)",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "avg_over_time(\n  count by (user) (\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n  )[$__range:]\n)",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": { "byField": "user", "mode": "outer" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time 1": true,
+              "Time 2": true,
+              "__name__": true,
+              "job 1": true,
+              "job 2": true,
+              "instance 1": true,
+              "instance 2": true
+            },
+            "indexByName": {
+              "user": 0,
+              "Value #A": 1,
+              "Value #B": 2
+            },
+            "renameByName": {
+              "Value #A": "avg util %",
+              "Value #B": "avg GPUs allocated"
+            }
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "binary",
+            "binary": {
+              "left": "avg GPUs allocated",
+              "operator": "*",
+              "right": "avg util %"
+            },
+            "reduce": { "reducer": "sum" },
+            "alias": "_used_gpu_eq"
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "binary",
+            "binary": {
+              "left": "_used_gpu_eq",
+              "operator": "/",
+              "right": "100"
+            },
+            "reduce": { "reducer": "sum" },
+            "alias": "used GPU-eq"
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "binary",
+            "binary": {
+              "left": "avg GPUs allocated",
+              "operator": "-",
+              "right": "used GPU-eq"
+            },
+            "reduce": { "reducer": "sum" },
+            "alias": "wasted GPU-eq"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "_used_gpu_eq": true, "used GPU-eq": true },
+            "indexByName": {
+              "user": 0,
+              "avg util %": 1,
+              "avg GPUs allocated": 2,
+              "wasted GPU-eq": 3
+            },
+            "renameByName": {}
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [{ "field": "wasted GPU-eq", "desc": true }]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "avg util %" },
+            "properties": [
+              { "id": "unit", "value": "percent" },
+              { "id": "decimals", "value": 1 },
+              {
+                "id": "custom.cellOptions",
+                "value": { "type": "color-background", "mode": "gradient" }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "orange", "value": 20 },
+                    { "color": "yellow", "value": 50 },
+                    { "color": "green", "value": 80 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "avg GPUs allocated" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "decimals", "value": 1 },
+              {
+                "id": "custom.cellOptions",
+                "value": { "type": "gauge", "mode": "gradient" }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "wasted GPU-eq" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "decimals", "value": 1 },
+              {
+                "id": "custom.cellOptions",
+                "value": { "type": "color-background", "mode": "gradient" }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 2 },
+                    { "color": "orange", "value": 5 },
+                    { "color": "red", "value": 10 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": true,
+          "reducer": ["sum"],
+          "fields": ["avg GPUs allocated", "wasted GPU-eq"]
+        }
+      }
     }
   ],
   "refresh": "1m",
