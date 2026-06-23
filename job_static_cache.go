@@ -104,28 +104,56 @@ func (c *JobStaticCache) Refresh() {
 		return
 	}
 
-	args := []string{"-d", "show", "job"}
-	for _, id := range newIDs {
-		args = append(args, strconv.Itoa(id))
-	}
-	start := time.Now()
-	output, err := executeCommand("scontrol", args)
-	elapsed := time.Since(start)
-	if err != nil {
-		log.Warnf("JobStaticCache: scontrol show job (%d new) failed in %v: %v",
-			len(newIDs), elapsed, err)
+	output := fetchScontrolForJobs(newIDs)
+	if len(output) == 0 {
 		return
 	}
-	log.Debugf("JobStaticCache: fetched %d new jobs in %v (%d bytes)",
-		len(newIDs), elapsed, len(output))
 
-	infos := parseScontrolJobs(string(output))
+	infos := parseScontrolJobs(output)
 	c.mu.Lock()
 	for _, info := range infos {
 		c.entries[info.JobID] = info
 	}
 	c.lastDiff = time.Now()
 	c.mu.Unlock()
+}
+
+// fetchScontrolForJobs returns concatenated `scontrol -d show job` output for
+// the given job ids. scontrol does not accept multiple ids in one call, so we
+// either call once per id (cheap for a handful) or do a single full scan when
+// the batch is large enough to amortize the overhead.
+//
+// Per-call cost on this cluster: ~18 ms each. Full scan: ~90-140 ms.
+// Break-even is around 6 jobs.
+func fetchScontrolForJobs(ids []int) string {
+	const fullScanThreshold = 6
+	start := time.Now()
+
+	if len(ids) >= fullScanThreshold {
+		out, err := executeCommand("scontrol", []string{"-d", "show", "job"})
+		if err != nil {
+			log.Warnf("JobStaticCache: scontrol full scan failed in %v: %v",
+				time.Since(start), err)
+			return ""
+		}
+		log.Debugf("JobStaticCache: full scan for %d new jobs in %v (%d bytes)",
+			len(ids), time.Since(start), len(out))
+		return string(out)
+	}
+
+	var combined strings.Builder
+	for _, id := range ids {
+		out, err := executeCommand("scontrol", []string{"-d", "show", "job", strconv.Itoa(id)})
+		if err != nil {
+			log.Warnf("JobStaticCache: scontrol show job %d failed: %v", id, err)
+			continue
+		}
+		combined.Write(out)
+		combined.WriteByte('\n')
+	}
+	log.Debugf("JobStaticCache: per-job fetch of %d jobs in %v (%d bytes)",
+		len(ids), time.Since(start), combined.Len())
+	return combined.String()
 }
 
 // runningJobIDsFromSqueueCache reads the cached `squeue_users_basic` output
