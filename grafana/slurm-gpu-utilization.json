@@ -113,8 +113,8 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "GPUs in use by partition",
-      "description": "Count of GPUs currently allocated to jobs, grouped by partition. Sourced from slurm_user_partition_gpus_running (no DCGM join — pure allocation count).",
+      "title": "GPU allocation %, by GPU type",
+      "description": "Fraction of each GPU type currently allocated (allocated / total). 100% means that GPU pool is fully booked; lower values mean headroom available.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -124,24 +124,32 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "sum by (partition) (\n  slurm_user_partition_gpus_running{user=~\"$user\", partition=~\"$partition\"}\n)",
-          "legendFormat": "{{partition}}",
+          "expr": "100 * slurm_gpus_alloc_by_type{gpu_type=~\"$gpu_type\", gpu_type!~\"titanrtx|titanxp\"}\n  / on(gpu_type) slurm_gpus_total_by_type",
+          "legendFormat": "{{gpu_type}}",
           "interval": "1m"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "percent",
           "min": 0,
+          "max": 100,
           "custom": {
             "drawStyle": "line",
-            "lineInterpolation": "stepAfter",
-            "fillOpacity": 30,
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
             "showPoints": "never",
-            "spanNulls": false,
-            "stacking": { "mode": "normal", "group": "A" }
+            "spanNulls": false
           },
-          "color": { "mode": "palette-classic" }
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 80 },
+              { "color": "red", "value": 95 }
+            ]
+          }
         },
         "overrides": []
       },
@@ -238,7 +246,7 @@
         "type": "query",
         "label": "GPU type",
         "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-        "query": { "query": "label_values(slurm_job_gpu_index, gpu_type)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "query": { "query": "label_values(slurm_gpus_total_by_type{gpu_type!~\"titanrtx|titanxp\"}, gpu_type)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
         "current": { "selected": false, "text": "All", "value": "$__all" },
         "includeAll": true,
         "multi": true,
