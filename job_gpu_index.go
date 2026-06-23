@@ -22,9 +22,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// JobGPUAssignment is one (Hostname, gpu_index) -> (user, gpu_type) mapping
-// extracted from `scontrol -d show job`. The `Hostname` and `GPU` field names
-// match DCGM's labels exactly so the PromQL join is `on(Hostname, gpu)`.
+// JobGPUAssignment is one (Hostname, gpu_index) -> (user, gpu_type) mapping.
+// Field names Hostname / GPU match DCGM's labels exactly so the PromQL join is
+// `on(Hostname, gpu)`.
 type JobGPUAssignment struct {
 	User     string
 	Hostname string
@@ -32,70 +32,8 @@ type JobGPUAssignment struct {
 	GPUType  string
 }
 
-func ParseJobGPUIndices() []JobGPUAssignment {
-	return parseJobGPUIndices(string(GetCached("scontrol_job_gres")))
-}
-
-func parseJobGPUIndices(output string) []JobGPUAssignment {
-	var results []JobGPUAssignment
-	var currentUser string
-
-	for _, line := range strings.Split(output, "\n") {
-		trimmed := strings.TrimSpace(line)
-
-		if strings.HasPrefix(trimmed, "JobId=") {
-			currentUser = ""
-			continue
-		}
-
-		if strings.HasPrefix(trimmed, "UserId=") {
-			for _, f := range strings.Fields(trimmed) {
-				if !strings.HasPrefix(f, "UserId=") {
-					continue
-				}
-				u := strings.TrimPrefix(f, "UserId=")
-				if p := strings.Index(u, "("); p > 0 {
-					u = u[:p]
-				}
-				currentUser = u
-				break
-			}
-			continue
-		}
-
-		if !strings.HasPrefix(trimmed, "Nodes=") {
-			continue
-		}
-
-		nodeName, gresStr := extractNodesAndGres(trimmed)
-		if gresStr == "" || gresStr == "(null)" {
-			continue
-		}
-
-		gpuType, indices := parseGresIdx(gresStr)
-		if gpuType == "" || len(indices) == 0 {
-			continue
-		}
-
-		for _, host := range expandNodeList(nodeName) {
-			for _, idx := range indices {
-				results = append(results, JobGPUAssignment{
-					User:     currentUser,
-					Hostname: host,
-					GPU:      idx,
-					GPUType:  gpuType,
-				})
-			}
-		}
-	}
-
-	return results
-}
-
-// extractNodesAndGres pulls "Nodes=..." and "GRES=..." out of a per-node line.
-// GRES values can contain spaces inside parentheses in some Slurm versions, so
-// we don't rely on strings.Fields for the GRES field — we capture everything
-// after "GRES=" up to the next "Key=" token at depth 0.
+// extractNodesAndGres pulls "Nodes=..." and "GRES=..." out of a per-node
+// allocation line in `scontrol -d show job` output.
 func extractNodesAndGres(line string) (string, string) {
 	var nodes, gres string
 	for _, f := range strings.Fields(line) {
@@ -110,7 +48,7 @@ func extractNodesAndGres(line string) (string, string) {
 }
 
 // parseGresIdx pulls the GPU type and physical indices out of a GRES spec like
-// "gpu:a40:1(IDX:0)" or "gpu:h100:2(IDX:0,3)" or "gpu:a100:4(IDX:0-2,5)".
+// "gpu:a40:1(IDX:0)", "gpu:h100:2(IDX:0,3)", or "gpu:a100:4(IDX:0-2,5)".
 func parseGresIdx(gres string) (string, []string) {
 	for _, piece := range splitGresEntries(gres) {
 		if !strings.HasPrefix(piece, "gpu:") {
@@ -201,15 +139,20 @@ func (c *JobGPUIndexCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *JobGPUIndexCollector) Collect(ch chan<- prometheus.Metric) {
+	if jobStaticCache == nil {
+		return
+	}
 	seen := make(map[string]bool)
-	for _, a := range ParseJobGPUIndices() {
-		key := a.User + "|" + a.Hostname + "|" + a.GPU + "|" + a.GPUType
-		if seen[key] {
-			continue
+	for _, info := range jobStaticCache.Snapshot() {
+		for _, a := range info.GPUs {
+			key := a.User + "|" + a.Hostname + "|" + a.GPU + "|" + a.GPUType
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			ch <- prometheus.MustNewConstMetric(
+				c.jobGPUIndex, prometheus.GaugeValue, 1,
+				a.User, a.Hostname, a.GPU, a.GPUType)
 		}
-		seen[key] = true
-		ch <- prometheus.MustNewConstMetric(
-			c.jobGPUIndex, prometheus.GaugeValue, 1,
-			a.User, a.Hostname, a.GPU, a.GPUType)
 	}
 }

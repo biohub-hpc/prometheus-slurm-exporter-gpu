@@ -46,6 +46,11 @@ func main() {
         slurmCache.RefreshAll(true)
         log.Infof("Initial cache refresh complete")
 
+        // Per-job static cache: maintains scontrol-derived fields (WorkDir,
+        // GPU IDX, etc.) keyed by job id. Only fetches new jobs on each diff.
+        jobStaticCache = NewJobStaticCache(60 * time.Second)
+        jobStaticCache.Refresh()
+
         // Build the list of all collectors
         collectors := []prometheus.Collector{
                 NewAccountsCollector(),   // from accounts.go
@@ -60,6 +65,7 @@ func main() {
                 NewGresCollector(),       // from gres.go
                 NewGPUsCollector(),       // from gpus.go
                 NewJobGPUIndexCollector(), // from job_gpu_index.go
+                NewJobProjectCollector(),  // from job_project.go
         }
 
         // Wrap all collectors in a CachingCollector that pre-builds metrics
@@ -79,6 +85,7 @@ func main() {
                 defer ticker.Stop()
                 for range ticker.C {
                         slurmCache.RefreshAll(true)
+                        jobStaticCache.Refresh()
                         cachingCollector.Refresh()
                 }
         }()
