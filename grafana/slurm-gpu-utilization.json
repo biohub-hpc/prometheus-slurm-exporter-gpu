@@ -400,7 +400,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "GPU workload classification (count of allocated GPUs)",
-      "description": "Each line counts how many allocated GPUs match the workload profile. Categories are NOT mutually exclusive — a single GPU can register in multiple lines (e.g., compute+memory-bound). Compare against the total allocated for context. Thresholds (tuned for this cluster's observed PCIe rates): compute-bound=GPU_UTIL>=50%; I/O-bound=GPU_UTIL<50% AND PCIe RX>=100 MB/s; memory-bound=GPU_UTIL<50% AND MEM_COPY_UTIL>=50%; idle=GPU_UTIL<10% AND MEM_COPY_UTIL<10% AND PCIe RX<10 MB/s.",
+      "description": "Each line counts how many allocated GPUs show that workload pattern. Categories are NOT mutually exclusive — a single GPU can register in multiple lines. Thresholds tuned to this cluster's observed activity (which runs cold; p90 PCIe is ~5 MB/s, p90 MEM_COPY is ~0%): compute-bound=GPU_UTIL>=50%; I/O-bound=GPU_UTIL<50% AND PCIe RX>=5 MB/s (loose: 'any meaningful data movement'); memory-bound=GPU_UTIL<50% AND MEM_COPY_UTIL>=10% (loose: 'any meaningful HBM activity'); idle=GPU_UTIL<10% AND MEM_COPY_UTIL<10% AND PCIe RX<10 MB/s.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -417,14 +417,14 @@
         {
           "refId": "B",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "count(\n  ((DCGM_FI_DEV_GPU_UTIL < 50) and (rate(DCGM_FI_PROF_PCIE_RX_BYTES[5m]) >= 100*1024*1024))\n  * on(Hostname, gpu) group_left\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n)",
+          "expr": "count(\n  ((DCGM_FI_DEV_GPU_UTIL < 50) and (rate(DCGM_FI_PROF_PCIE_RX_BYTES[5m]) >= 5*1024*1024))\n  * on(Hostname, gpu) group_left\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n)",
           "legendFormat": "I/O-bound",
           "interval": "1m"
         },
         {
           "refId": "C",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "count(\n  ((DCGM_FI_DEV_GPU_UTIL < 50) and (DCGM_FI_DEV_MEM_COPY_UTIL >= 50))\n  * on(Hostname, gpu) group_left\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n)",
+          "expr": "count(\n  ((DCGM_FI_DEV_GPU_UTIL < 50) and (DCGM_FI_DEV_MEM_COPY_UTIL >= 10))\n  * on(Hostname, gpu) group_left\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n)",
           "legendFormat": "memory-bound",
           "interval": "1m"
         },
