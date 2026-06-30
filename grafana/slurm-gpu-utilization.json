@@ -353,6 +353,155 @@
       }
     },
     {
+      "id": 6,
+      "type": "timeseries",
+      "title": "PCIe RX throughput by user (top 10)",
+      "description": "Top users by average PCIe host->GPU transfer rate. High RX with low GPU_UTIL = classic data-loading-bound workload (GPU starved waiting for data).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 22 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "topk(10,\n  avg by (user) (\n    rate(DCGM_FI_PROF_PCIE_RX_BYTES[5m])\n    * on(Hostname, gpu) group_left(user, gpu_type)\n      slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n  )\n)",
+          "legendFormat": "{{user}}",
+          "interval": "1m"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["mean", "max"]
+        },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "GPU workload classification (count of allocated GPUs)",
+      "description": "Each line counts how many allocated GPUs match the workload profile. Categories are NOT mutually exclusive — a single GPU can register in multiple lines (e.g., compute+memory-bound). Compare against the total allocated for context. Thresholds (tuned for this cluster's observed PCIe rates): compute-bound=GPU_UTIL>=50%; I/O-bound=GPU_UTIL<50% AND PCIe RX>=100 MB/s; memory-bound=GPU_UTIL<50% AND MEM_COPY_UTIL>=50%; idle=GPU_UTIL<10% AND MEM_COPY_UTIL<10% AND PCIe RX<10 MB/s.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 22 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "count(\n  (DCGM_FI_DEV_GPU_UTIL >= 50)\n  * on(Hostname, gpu) group_left\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n)",
+          "legendFormat": "compute-bound",
+          "interval": "1m"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "count(\n  ((DCGM_FI_DEV_GPU_UTIL < 50) and (rate(DCGM_FI_PROF_PCIE_RX_BYTES[5m]) >= 100*1024*1024))\n  * on(Hostname, gpu) group_left\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n)",
+          "legendFormat": "I/O-bound",
+          "interval": "1m"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "count(\n  ((DCGM_FI_DEV_GPU_UTIL < 50) and (DCGM_FI_DEV_MEM_COPY_UTIL >= 50))\n  * on(Hostname, gpu) group_left\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n)",
+          "legendFormat": "memory-bound",
+          "interval": "1m"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "count(\n  ((DCGM_FI_DEV_GPU_UTIL < 10) and (DCGM_FI_DEV_MEM_COPY_UTIL < 10) and (rate(DCGM_FI_PROF_PCIE_RX_BYTES[5m]) < 10*1024*1024))\n  * on(Hostname, gpu) group_left\n    slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"}\n)",
+          "legendFormat": "idle",
+          "interval": "1m"
+        },
+        {
+          "refId": "E",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "count(slurm_job_gpu_index{user=~\"$user\", gpu_type=~\"$gpu_type\"})",
+          "legendFormat": "total allocated",
+          "interval": "1m"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false,
+            "lineWidth": 2
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "total allocated" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "gray" } },
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 5] } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "idle" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "compute-bound" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "I/O-bound" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "memory-bound" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["mean", "max", "last"]
+        },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
       "id": 5,
       "type": "table",
       "title": "User GPU efficiency over selected time window (sorted: worst utilization first)",
@@ -361,7 +510,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 22 },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 31 },
       "targets": [
         {
           "refId": "A",
